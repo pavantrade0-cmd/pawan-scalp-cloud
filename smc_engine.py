@@ -8,7 +8,7 @@ class SMCEngine:
     @staticmethod
     def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculates EMA 20, EMA 50, and RSI 14 according to Scalping Pulse settings.
+        Calculates EMA 20, EMA 50, RSI 14, and Volume SMA 20.
         """
         if len(df) < 50:
             return df
@@ -28,17 +28,20 @@ class SMCEngine:
         rs = avg_gain / (avg_loss + 1e-9)
         df['rsi'] = 100 - (100 / (1 + rs))
 
+        # Volume SMA 20 (RVOL Filter)
+        if 'volume' in df.columns:
+            df['vol_sma20'] = df['volume'].rolling(window=20).mean()
+
         return df
 
     def scan_for_setups(self, df: pd.DataFrame) -> dict:
         """
-        Exact implementation of Scalping Pulse by Neeraj:
+        A+ Pure 20/50 EMA Scalping Engine:
         - Timeframe: 5m
-        - EMA 20 > EMA 50 for BUY, EMA 20 < EMA 50 for SELL
-        - Pullback: Candle wicks touch/pierce EMA 20
-        - Confirmation: Candle closes in trend direction
-        - Momentum: RSI >= 50.0 for BUY, RSI <= 50.0 for SELL
-        - Targets: Target 1 (1:1 RR) & Target 2 (1:2 Full Target)
+        - Trend: Clean EMA 20/50 separation
+        - Pullback & Rejection: Candle pierces EMA 20 with clean wick rejection
+        - Volume confirmation: Participation above average
+        - Asset-Adaptive: Dynamic risk thresholds for both NIFTY and BTC
         """
         default_res = {
             "signal": "WAIT",
@@ -71,61 +74,84 @@ class SMCEngine:
         c_low = float(c['low'])
         c_close = float(c['close'])
 
-        # Filter: Avoid tight EMA squeezing/flat consolidation traps
+        candle_range = max(c_high - c_low, 0.01)
+
+        # Dynamic Asset Calibration (NIFTY vs BTC-USD)
+        is_crypto = c_close > 35000.0
+        min_gap = 15.0 if is_crypto else 2.0
+        min_risk = 40.0 if is_crypto else 10.0
+        max_risk = 850.0 if is_crypto else 75.0
+
         ema_separation = abs(ema20 - ema50)
-        min_gap = 2.0  # Minimum 2 points gap on Nifty 50 to confirm clean slope
+
+        # Volume Filter check (if volume feed exists)
+        vol_ok = True
+        if 'vol_sma20' in c and not np.isnan(c['vol_sma20']) and c['vol_sma20'] > 0:
+            vol_ok = float(c['volume']) >= (float(c['vol_sma20']) * 0.95)
 
         # ---------------- 1. BUY (CE) SETUP ----------------
         if (ema20 > ema50 and ema_separation >= min_gap):
-            if rsi >= 50.0:
+            if rsi >= 50.0 and vol_ok:
                 wick_touched = c_low <= (ema20 * 1.0008)
                 closed_above = c_close > ema20
                 is_green = c_close >= c_open
 
-                if wick_touched and closed_above and is_green:
+                # Lower Wick Rejection: Buyers pushing price up from EMA
+                lower_wick = min(c_open, c_close) - c_low
+                has_rejection = (lower_wick / candle_range) >= 0.20
+
+                if wick_touched and closed_above and is_green and has_rejection:
                     entry = round(c_close, 2)
                     recent_low = min(c_low, float(c_prev['low']))
-                    sl = round(recent_low - 1.0, 2)
+                    sl_buffer = 5.0 if is_crypto else 1.0
+                    sl = round(recent_low - sl_buffer, 2)
                     
                     risk_pts = round(entry - sl, 2)
-                    if 10.0 <= risk_pts <= 75.0:
-                        t1 = round(entry + (risk_pts * 1.0), 2)  # 1:1 Target
-                        t2 = round(entry + (risk_pts * 2.0), 2)  # 1:2 Full Target
+                    if min_risk <= risk_pts <= max_risk:
+                        t1_partial = round(entry + (risk_pts * 1.0), 2)  # 1:1 Partial Level
+                        t2_full = round(entry + (risk_pts * 2.0), 2)     # 1:2 Full Level
                         return {
                             "signal": "BUY CE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": t1,
-                            "target_2": t2,
+                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
+                            "target_2": t2_full,
+                            "target_partial": t1_partial,
                             "points": risk_pts,
-                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (>50)",
+                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (&gt;50)",
                             "candle_time": str(candle_time)
                         }
 
         # ---------------- 2. SELL (PE) SETUP ----------------
         if (ema20 < ema50 and ema_separation >= min_gap):
-            if rsi <= 50.0:
+            if rsi <= 50.0 and vol_ok:
                 wick_touched = c_high >= (ema20 * 0.9992)
                 closed_below = c_close < ema20
                 is_red = c_close <= c_open
 
-                if wick_touched and closed_below and is_red:
+                # Upper Wick Rejection: Sellers pushing price down from EMA
+                upper_wick = c_high - max(c_open, c_close)
+                has_rejection = (upper_wick / candle_range) >= 0.20
+
+                if wick_touched and closed_below and is_red and has_rejection:
                     entry = round(c_close, 2)
                     recent_high = max(c_high, float(c_prev['high']))
-                    sl = round(recent_high + 1.0, 2)
+                    sl_buffer = 5.0 if is_crypto else 1.0
+                    sl = round(recent_high + sl_buffer, 2)
                     
                     risk_pts = round(sl - entry, 2)
-                    if 10.0 <= risk_pts <= 75.0:
-                        t1 = round(entry - (risk_pts * 1.0), 2)  # 1:1 Target
-                        t2 = round(entry - (risk_pts * 2.0), 2)  # 1:2 Full Target
+                    if min_risk <= risk_pts <= max_risk:
+                        t1_partial = round(entry - (risk_pts * 1.0), 2)  # 1:1 Partial Level
+                        t2_full = round(entry - (risk_pts * 2.0), 2)     # 1:2 Full Level
                         return {
                             "signal": "BUY PE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": t1,
-                            "target_2": t2,
+                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
+                            "target_2": t2_full,
+                            "target_partial": t1_partial,
                             "points": risk_pts,
-                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (<50)",
+                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (&lt;50)",
                             "candle_time": str(candle_time)
                         }
 
