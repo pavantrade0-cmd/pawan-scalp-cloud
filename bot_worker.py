@@ -7,7 +7,7 @@ from market_feed import MarketFeed
 from smc_engine import SMCEngine
 from telegram_bot import TelegramNotifier
 
-# 1. Render Web Service Healthy గా ఉండటానికి చిన్న HTTP సర్వర్
+# 1. Render Web Service Healthy గా ఉండటానికి HTTP సర్వర్
 class SimpleHealthServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -39,7 +39,7 @@ def run_cloud_scanner():
     active_trades = {}
     last_candle_times = {}
     
-    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nBot healthy and scanning BTC-USD & NIFTY with 1:2 RR.")
+    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nMulti-Target Mode Active: Target 1 (1:1) & Full Target (1:2).")
 
     while True:
         try:
@@ -53,27 +53,51 @@ def run_cloud_scanner():
 
                 live_price = float(df['close'].iloc[-1])
 
-                # 1. IN-TRADE SL / TP CHECK (Single-Position Lock)
+                # 1. IN-TRADE SL / TP CHECK (Multi-Stage Target Tracking)
                 if sym_name in active_trades:
                     trade = active_trades[sym_name]
                     direction = trade["signal"]
-                    tp = trade["target_1"]
+                    tp1 = trade["target_1"]
+                    tp2 = trade["target_2"]
                     sl = trade["stop_loss"]
+                    pts = trade.get("points", 0)
 
                     if direction == "BUY CE":
-                        if live_price >= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0) * 2:.0f} pts) 🎯", live_price)
+                        # Full Target 1:2 Hit
+                        if live_price >= tp2:
+                            tg.send_exit_alert(sym_name, direction, f"FULL TARGET HIT (1:2) (+{pts * 2:.0f} pts) 🎯🎯", live_price)
                             del active_trades[sym_name]
+                        # Target 1 (1:1) Hit
+                        elif live_price >= tp1 and not trade.get("tp1_hit", False):
+                            trade["tp1_hit"] = True
+                            tg.send_message(
+                                f"🎯 <b>TARGET 1 HIT (1:1) — {sym_name}</b>\n"
+                                f"⚡ <b>Trade:</b> {direction}\n"
+                                f"💰 <b>LTP:</b> {live_price:,.2f} (+{pts:.0f} pts)\n"
+                                f"🚀 <i>Holding runner position for Full Target (1:2): {tp2:,.2f}</i>"
+                            )
+                        # Stop Loss Hit
                         elif live_price <= sl:
-                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{pts:.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
 
                     elif direction == "BUY PE":
-                        if live_price <= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0) * 2:.0f} pts) 🎯", live_price)
+                        # Full Target 1:2 Hit
+                        if live_price <= tp2:
+                            tg.send_exit_alert(sym_name, direction, f"FULL TARGET HIT (1:2) (+{pts * 2:.0f} pts) 🎯🎯", live_price)
                             del active_trades[sym_name]
+                        # Target 1 (1:1) Hit
+                        elif live_price <= tp1 and not trade.get("tp1_hit", False):
+                            trade["tp1_hit"] = True
+                            tg.send_message(
+                                f"🎯 <b>TARGET 1 HIT (1:1) — {sym_name}</b>\n"
+                                f"⚡ <b>Trade:</b> {direction}\n"
+                                f"💰 <b>LTP:</b> {live_price:,.2f} (+{pts:.0f} pts)\n"
+                                f"🚀 <i>Holding runner position for Full Target (1:2): {tp2:,.2f}</i>"
+                            )
+                        # Stop Loss Hit
                         elif live_price >= sl:
-                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{pts:.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
                     continue
 
@@ -85,13 +109,14 @@ def run_cloud_scanner():
                         last_candle_times[sym_name] = c_time
                         active_trades[sym_name] = setup
                         
-                        tg.send_entry_alert(
-                            symbol=sym_name,
-                            direction=setup["signal"],
-                            entry=setup["entry_price"],
-                            sl=setup["stop_loss"],
-                            tp=setup["target_1"],
-                            reason=setup["reason"]
+                        tg.send_message(
+                            f"🔔 <b>NEW SCALP SIGNAL: {setup['signal']}</b>\n\n"
+                            f"📌 <b>Asset:</b> {sym_name}\n"
+                            f"🔹 <b>Entry:</b> {setup['entry_price']:,.2f}\n"
+                            f"🛑 <b>Stop Loss:</b> {setup['stop_loss']:,.2f} (-{setup['points']:.0f} pts)\n"
+                            f"🎯 <b>Target 1 (1:1):</b> {setup['target_1']:,.2f} (+{setup['points']:.0f} pts)\n"
+                            f"🏆 <b>Target 2 (1:2):</b> {setup['target_2']:,.2f} (+{setup['points'] * 2:.0f} pts)\n"
+                            f"💡 <b>Reason:</b> {setup['reason']}"
                         )
                         print(f"[{sym_name}] New Alert Sent to Telegram.")
 
@@ -101,9 +126,6 @@ def run_cloud_scanner():
         time.sleep(5)
 
 if __name__ == "__main__":
-    # బ్యాక్‌గ్రౌండ్ థ్రెడ్‌లో HTTP వెబ్ పోర్ట్ రన్ చేయడం
     web_thread = threading.Thread(target=run_http_server, daemon=True)
     web_thread.start()
-    
-    # స్కానర్ ప్రారంభం
     run_cloud_scanner()
