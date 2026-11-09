@@ -10,11 +10,9 @@ class SMCEngine:
         if len(df) < 50:
             return df
 
-        # EMA 20 & EMA 50
         df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
 
-        # RSI 14
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0.0)
         loss = -delta.where(delta < 0, 0.0)
@@ -63,7 +61,6 @@ class SMCEngine:
 
         candle_range = max(c_high - c_low, 0.01)
 
-        # Dynamic Risk: Nifty 75 pts, BTC up to 850 pts
         is_crypto = c_close > 35000.0
         min_gap = 15.0 if is_crypto else 2.0
         min_risk = 40.0 if is_crypto else 10.0
