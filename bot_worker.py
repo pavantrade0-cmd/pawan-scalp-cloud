@@ -5,7 +5,7 @@ from smc_engine import SMCEngine
 from telegram_bot import TelegramNotifier
 
 def run_cloud_scanner():
-    print("?? Cloud Scalper Bot Started... Monitoring 24/7.")
+    print("🌐 Cloud Scalper Bot Started... Monitoring 24/7.")
     
     tg = TelegramNotifier(
         bot_token="9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ",
@@ -21,7 +21,7 @@ def run_cloud_scanner():
     active_trades = {}
     last_candle_times = {}
     
-    tg.send_message("?? <b>PAWAN CLOUD SCALPER ONLINE</b>\n??????????? ?????? ????? 20/50 EMA ???????? 24/7 ????????????? ???????.")
+    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER ONLINE</b>\n20/50 EMA Scalper active 24/7. Signals will be delivered instantly.")
 
     while True:
         try:
@@ -44,18 +44,18 @@ def run_cloud_scanner():
 
                     if direction == "BUY CE":
                         if live_price >= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) ??", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) 🎯", live_price)
                             del active_trades[sym_name]
                         elif live_price <= sl:
-                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) ??", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
 
                     elif direction == "BUY PE":
                         if live_price <= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) ??", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) 🎯", live_price)
                             del active_trades[sym_name]
-                        elif live_price <= sl:
-                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) ??", live_price)
+                        elif live_price >= sl:
+                            tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
                     continue
 
