@@ -38,13 +38,14 @@ class SMCEngine:
         - Pullback: Candle wicks touch/pierce EMA 20
         - Confirmation: Candle closes in trend direction
         - Momentum: RSI >= 50.0 for BUY, RSI <= 50.0 for SELL
-        - Risk:Reward: 2.0 (Strict Dynamic 1:2 Swing SL)
+        - Targets: Target 1 (1:1 RR) & Target 2 (1:2 Full Target)
         """
         default_res = {
             "signal": "WAIT",
             "entry_price": 0.0,
             "stop_loss": 0.0,
             "target_1": 0.0,
+            "target_2": 0.0,
             "points": 0.0,
             "reason": "Scanning 5m EMA 20/50 pullback...",
             "candle_time": None
@@ -77,23 +78,25 @@ class SMCEngine:
         # ---------------- 1. BUY (CE) SETUP ----------------
         if (ema20 > ema50 and ema_separation >= min_gap):
             if rsi >= 50.0:
-                wick_touched = c_low <= (ema20 * 1.0008)  # slight buffer for touch
+                wick_touched = c_low <= (ema20 * 1.0008)
                 closed_above = c_close > ema20
                 is_green = c_close >= c_open
 
                 if wick_touched and closed_above and is_green:
                     entry = round(c_close, 2)
                     recent_low = min(c_low, float(c_prev['low']))
-                    sl = round(recent_low - 1.0, 2)  # 1 pt safety buffer below wick
+                    sl = round(recent_low - 1.0, 2)
                     
                     risk_pts = round(entry - sl, 2)
-                    if 10.0 <= risk_pts <= 75.0:  # Valid scalping range
-                        target = round(entry + (risk_pts * 2.0), 2)  # Strict 1:2.0 RR
+                    if 10.0 <= risk_pts <= 75.0:
+                        t1 = round(entry + (risk_pts * 1.0), 2)  # 1:1 Target
+                        t2 = round(entry + (risk_pts * 2.0), 2)  # 1:2 Full Target
                         return {
                             "signal": "BUY CE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": target,
+                            "target_1": t1,
+                            "target_2": t2,
                             "points": risk_pts,
                             "reason": f"20 EMA Pullback + RSI {rsi:.1f} (>50)",
                             "candle_time": str(candle_time)
@@ -109,16 +112,18 @@ class SMCEngine:
                 if wick_touched and closed_below and is_red:
                     entry = round(c_close, 2)
                     recent_high = max(c_high, float(c_prev['high']))
-                    sl = round(recent_high + 1.0, 2)  # 1 pt safety buffer above wick
+                    sl = round(recent_high + 1.0, 2)
                     
                     risk_pts = round(sl - entry, 2)
-                    if 10.0 <= risk_pts <= 75.0:  # Valid scalping range
-                        target = round(entry - (risk_pts * 2.0), 2)  # Strict 1:2.0 RR
+                    if 10.0 <= risk_pts <= 75.0:
+                        t1 = round(entry - (risk_pts * 1.0), 2)  # 1:1 Target
+                        t2 = round(entry - (risk_pts * 2.0), 2)  # 1:2 Full Target
                         return {
                             "signal": "BUY PE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": target,
+                            "target_1": t1,
+                            "target_2": t2,
                             "points": risk_pts,
                             "reason": f"20 EMA Pullback + RSI {rsi:.1f} (<50)",
                             "candle_time": str(candle_time)
