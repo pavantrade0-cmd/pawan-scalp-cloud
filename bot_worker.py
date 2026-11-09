@@ -1,9 +1,27 @@
+import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import pandas as pd
 from market_feed import MarketFeed
 from smc_engine import SMCEngine
 from telegram_bot import TelegramNotifier
 
+# 1. Render Web Service Healthy గా ఉండటానికి చిన్న HTTP సర్వర్
+class SimpleHealthServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"PAWAN SCALPER CLOUD ENGINE ACTIVE")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHealthServer)
+    print(f"HTTP Server listening on port {port}")
+    server.serve_forever()
+
+# 2. మెయిన్ స్కాల్పింగ్ స్కానర్
 def run_cloud_scanner():
     print("🌐 Cloud Scalper Bot Started... Monitoring 24/7.")
     
@@ -21,7 +39,7 @@ def run_cloud_scanner():
     active_trades = {}
     last_candle_times = {}
     
-    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER ONLINE</b>\n20/50 EMA Scalper active 24/7. Signals will be delivered instantly.")
+    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nBot healthy and scanning BTC-USD & NIFTY with 1:2 RR.")
 
     while True:
         try:
@@ -44,7 +62,7 @@ def run_cloud_scanner():
 
                     if direction == "BUY CE":
                         if live_price >= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) 🎯", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0) * 2:.0f} pts) 🎯", live_price)
                             del active_trades[sym_name]
                         elif live_price <= sl:
                             tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
@@ -52,7 +70,7 @@ def run_cloud_scanner():
 
                     elif direction == "BUY PE":
                         if live_price <= tp:
-                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0):.0f} pts) 🎯", live_price)
+                            tg.send_exit_alert(sym_name, direction, f"TARGET HIT (+{trade.get('points', 0) * 2:.0f} pts) 🎯", live_price)
                             del active_trades[sym_name]
                         elif live_price >= sl:
                             tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{trade.get('points', 0):.0f} pts) 🛑", live_price)
@@ -83,4 +101,9 @@ def run_cloud_scanner():
         time.sleep(5)
 
 if __name__ == "__main__":
+    # బ్యాక్‌గ్రౌండ్ థ్రెడ్‌లో HTTP వెబ్ పోర్ట్ రన్ చేయడం
+    web_thread = threading.Thread(target=run_http_server, daemon=True)
+    web_thread.start()
+    
+    # స్కానర్ ప్రారంభం
     run_cloud_scanner()
