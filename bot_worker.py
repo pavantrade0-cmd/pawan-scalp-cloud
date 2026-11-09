@@ -72,7 +72,7 @@ def run_cloud_scanner():
                         if live_price <= tp:
                             tg.send_exit_alert(sym_name, direction, f"FULL TARGET HIT (1:2) (+{risk * 2:.0f} pts) 🎯🎯", live_price)
                             del active_trades[sym_name]
-                        elif live_price >= sl:
+                        elif live_price <= sl:
                             tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{risk:.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
                     continue
@@ -88,6 +88,10 @@ def run_cloud_scanner():
                         target_price = setup.get("target_2", setup.get("target_1"))
                         risk = setup.get("points", 0)
                         
+                        # BTC-USD లోని "<50" లేదా ">50" టెలిగ్రామ్ HTML ట్యాగ్‌ను క్రాష్ చేయకుండా సేఫ్‌గా మార్చడం:
+                        raw_reason = str(setup.get('reason', ''))
+                        safe_reason = raw_reason.replace("<", "&lt;").replace(">", "&gt;")
+                        
                         msg = (
                             f"⚡ <b>PAWAN SCALPER — NEW ENTRY</b> ⚡\n\n"
                             f"📌 <b>Asset:</b> {sym_name}\n"
@@ -95,7 +99,7 @@ def run_cloud_scanner():
                             f"🎯 <b>Entry Price:</b> {setup['entry_price']:,.2f}\n"
                             f"🛑 <b>Stop Loss:</b> {setup['stop_loss']:,.2f} (-{risk:.0f} pts)\n"
                             f"🏁 <b>Target (1:2):</b> {target_price:,.2f} (+{risk * 2:.0f} pts)\n\n"
-                            f"📊 <b>Reason:</b> {setup['reason']}\n"
+                            f"📊 <b>Reason:</b> {safe_reason}\n"
                             f"🔒 <i>Position locked until SL or Target hit.</i>"
                         )
                         tg.send_message(msg)
