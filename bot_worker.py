@@ -7,7 +7,7 @@ from market_feed import MarketFeed
 from smc_engine import SMCEngine
 from telegram_bot import TelegramNotifier
 
-# 1. Render Web Service 24/7 Healthy గా ఉండటానికి HTTP సర్వర్
+# 1. Render Web Service 24/7 Healthy ga undataniki HTTP Server
 class SimpleHealthServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +20,7 @@ def run_http_server():
     server = HTTPServer(("0.0.0.0", port), SimpleHealthServer)
     server.serve_forever()
 
-# 2. క్లౌడ్ స్కాల్పింగ్ స్కానర్
+# 2. Cloud Scalping Scanner with TP1 & TP2 Trailing Logic
 def run_cloud_scanner():
     print("🌐 Cloud Scalper Bot Started... Monitoring 24/7.")
     
@@ -38,7 +38,7 @@ def run_cloud_scanner():
     active_trades = {}
     last_candle_times = {}
     
-    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nBot monitoring BTC-USD & NIFTY 50 with strict 1:2 Risk-Reward.")
+    tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nBot monitoring BTC-USD & NIFTY 50 with Dual Targets (TP1: 1:1, TP2: 1:2).")
 
     while True:
         try:
@@ -52,16 +52,24 @@ def run_cloud_scanner():
 
                 live_price = float(df['close'].iloc[-1])
 
-                # 1. IN-TRADE SL / TP CHECK (Strict Single-Position Lock)
+                # 1. IN-TRADE SL / TP1 / TP2 CHECK
                 if sym_name in active_trades:
                     trade = active_trades[sym_name]
                     direction = trade["signal"]
-                    tp = trade.get("target_2", trade.get("target_1"))
+                    tp1 = trade.get("target_partial")
+                    tp2 = trade.get("target_2", trade.get("target_1"))
                     sl = trade["stop_loss"]
                     risk = trade.get("points", 0)
+                    tp1_hit = trade.get("tp1_hit", False)
 
                     if direction == "BUY CE":
-                        if live_price >= tp:
+                        # Check TP1 first (Trigger alert only once)
+                        if not tp1_hit and live_price >= tp1:
+                            trade["tp1_hit"] = True
+                            tg.send_partial_tp_alert(sym_name, direction, live_price, risk * 1.0)
+
+                        # Check Full TP2
+                        if live_price >= tp2:
                             tg.send_exit_alert(sym_name, direction, f"FULL TARGET HIT (1:2) (+{risk * 2:.0f} pts) 🎯🎯", live_price)
                             del active_trades[sym_name]
                         elif live_price <= sl:
@@ -69,10 +77,16 @@ def run_cloud_scanner():
                             del active_trades[sym_name]
 
                     elif direction == "BUY PE":
-                        if live_price <= tp:
+                        # Check TP1 first (Trigger alert only once)
+                        if not tp1_hit and live_price <= tp1:
+                            trade["tp1_hit"] = True
+                            tg.send_partial_tp_alert(sym_name, direction, live_price, risk * 1.0)
+
+                        # Check Full TP2
+                        if live_price <= tp2:
                             tg.send_exit_alert(sym_name, direction, f"FULL TARGET HIT (1:2) (+{risk * 2:.0f} pts) 🎯🎯", live_price)
                             del active_trades[sym_name]
-                        elif live_price <= sl:
+                        elif live_price >= sl:
                             tg.send_exit_alert(sym_name, direction, f"STOP LOSS HIT (-{risk:.0f} pts) 🛑", live_price)
                             del active_trades[sym_name]
                     continue
@@ -83,27 +97,22 @@ def run_cloud_scanner():
                     c_time = setup.get("candle_time")
                     if last_candle_times.get(sym_name) != c_time:
                         last_candle_times[sym_name] = c_time
+                        setup["tp1_hit"] = False  # Track TP1 status
                         active_trades[sym_name] = setup
                         
-                        target_price = setup.get("target_2", setup.get("target_1"))
-                        risk = setup.get("points", 0)
+                        tp1 = setup.get("target_partial")
+                        tp2 = setup.get("target_2", setup.get("target_1"))
                         
-                        # BTC-USD లోని "<50" లేదా ">50" టెలిగ్రామ్ HTML ట్యాగ్‌ను క్రాష్ చేయకుండా సేఫ్‌గా మార్చడం:
-                        raw_reason = str(setup.get('reason', ''))
-                        safe_reason = raw_reason.replace("<", "&lt;").replace(">", "&gt;")
-                        
-                        msg = (
-                            f"⚡ <b>PAWAN SCALPER — NEW ENTRY</b> ⚡\n\n"
-                            f"📌 <b>Asset:</b> {sym_name}\n"
-                            f"🟢 <b>Action:</b> {setup['signal']}\n"
-                            f"🎯 <b>Entry Price:</b> {setup['entry_price']:,.2f}\n"
-                            f"🛑 <b>Stop Loss:</b> {setup['stop_loss']:,.2f} (-{risk:.0f} pts)\n"
-                            f"🏁 <b>Target (1:2):</b> {target_price:,.2f} (+{risk * 2:.0f} pts)\n\n"
-                            f"📊 <b>Reason:</b> {safe_reason}\n"
-                            f"🔒 <i>Position locked until SL or Target hit.</i>"
+                        tg.send_entry_alert(
+                            symbol=sym_name,
+                            direction=setup['signal'],
+                            entry=setup['entry_price'],
+                            sl=setup['stop_loss'],
+                            tp1=tp1,
+                            tp2=tp2,
+                            reason=setup.get('reason', '')
                         )
-                        tg.send_message(msg)
-                        print(f"[{sym_name}] New Clean 1:2 Alert Sent to Telegram.")
+                        print(f"[{sym_name}] New Entry Alert (TP1 & TP2) Sent to Telegram.")
 
         except Exception as e:
             print(f"[WORKER ERROR]: {e}")
