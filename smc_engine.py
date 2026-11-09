@@ -38,7 +38,7 @@ class SMCEngine:
         - Pullback: Candle wicks touch/pierce EMA 20
         - Confirmation: Candle closes in trend direction
         - Momentum: RSI >= 50.0 for BUY, RSI <= 50.0 for SELL
-        - Risk:Reward: 1.0 (Strict Dynamic 1:1 Swing SL)
+        - Risk:Reward: 2.0 (Strict Dynamic 1:2 Swing SL)
         """
         default_res = {
             "signal": "WAIT",
@@ -75,10 +75,6 @@ class SMCEngine:
         min_gap = 2.0  # Minimum 2 points gap on Nifty 50 to confirm clean slope
 
         # ---------------- 1. BUY (CE) SETUP ----------------
-        # 1) Uptrend: EMA 20 > EMA 50 with minimum separation
-        # 2) Momentum: RSI >= 50.0
-        # 3) Pullback: Wick touches or penetrates EMA 20 (Low <= EMA20)
-        # 4) Bullish Rejection: Closes above EMA 20 & Green Candle (Close > Open)
         if (ema20 > ema50 and ema_separation >= min_gap):
             if rsi >= 50.0:
                 wick_touched = c_low <= (ema20 * 1.0008)  # slight buffer for touch
@@ -87,13 +83,12 @@ class SMCEngine:
 
                 if wick_touched and closed_above and is_green:
                     entry = round(c_close, 2)
-                    # Stop loss at lowest wick of trigger candle & previous candle
                     recent_low = min(c_low, float(c_prev['low']))
                     sl = round(recent_low - 1.0, 2)  # 1 pt safety buffer below wick
                     
                     risk_pts = round(entry - sl, 2)
                     if 10.0 <= risk_pts <= 75.0:  # Valid scalping range
-                        target = round(entry + (risk_pts * 1.0), 2)  # Strict 1:1.0 RR
+                        target = round(entry + (risk_pts * 2.0), 2)  # Strict 1:2.0 RR
                         return {
                             "signal": "BUY CE",
                             "entry_price": entry,
@@ -105,10 +100,6 @@ class SMCEngine:
                         }
 
         # ---------------- 2. SELL (PE) SETUP ----------------
-        # 1) Downtrend: EMA 20 < EMA 50 with minimum separation
-        # 2) Momentum: RSI <= 50.0
-        # 3) Pullback: Wick touches or penetrates EMA 20 (High >= EMA20)
-        # 4) Bearish Rejection: Closes below EMA 20 & Red Candle (Close < Open)
         if (ema20 < ema50 and ema_separation >= min_gap):
             if rsi <= 50.0:
                 wick_touched = c_high >= (ema20 * 0.9992)
@@ -117,13 +108,12 @@ class SMCEngine:
 
                 if wick_touched and closed_below and is_red:
                     entry = round(c_close, 2)
-                    # Stop loss at highest wick of trigger candle & previous candle
                     recent_high = max(c_high, float(c_prev['high']))
                     sl = round(recent_high + 1.0, 2)  # 1 pt safety buffer above wick
                     
                     risk_pts = round(sl - entry, 2)
                     if 10.0 <= risk_pts <= 75.0:  # Valid scalping range
-                        target = round(entry - (risk_pts * 1.0), 2)  # Strict 1:1.0 RR
+                        target = round(entry - (risk_pts * 2.0), 2)  # Strict 1:2.0 RR
                         return {
                             "signal": "BUY PE",
                             "entry_price": entry,
