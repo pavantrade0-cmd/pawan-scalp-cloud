@@ -7,9 +7,6 @@ class SMCEngine:
 
     @staticmethod
     def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculates EMA 20, EMA 50, RSI 14, and Volume SMA 20.
-        """
         if len(df) < 50:
             return df
 
@@ -28,27 +25,19 @@ class SMCEngine:
         rs = avg_gain / (avg_loss + 1e-9)
         df['rsi'] = 100 - (100 / (1 + rs))
 
-        # Volume SMA 20 (RVOL Filter)
         if 'volume' in df.columns:
             df['vol_sma20'] = df['volume'].rolling(window=20).mean()
 
         return df
 
     def scan_for_setups(self, df: pd.DataFrame) -> dict:
-        """
-        A+ Pure 20/50 EMA Scalping Engine:
-        - Timeframe: 5m
-        - Trend: Clean EMA 20/50 separation
-        - Pullback & Rejection: Candle pierces EMA 20 with clean wick rejection
-        - Volume confirmation: Participation above average
-        - Asset-Adaptive: Dynamic risk thresholds for both NIFTY and BTC
-        """
         default_res = {
             "signal": "WAIT",
             "entry_price": 0.0,
             "stop_loss": 0.0,
             "target_1": 0.0,
             "target_2": 0.0,
+            "target_partial": 0.0,
             "points": 0.0,
             "reason": "Scanning 5m EMA 20/50 pullback...",
             "candle_time": None
@@ -57,10 +46,8 @@ class SMCEngine:
         if df.empty or len(df) < 55:
             return default_res
 
-        # Indicators Calculation
         df = self.calculate_indicators(df)
 
-        # Trigger Candle (Previous Closed 5m Candle: index -2)
         c = df.iloc[-2]
         c_prev = df.iloc[-3]
         candle_time = df.index[-2]
@@ -76,7 +63,7 @@ class SMCEngine:
 
         candle_range = max(c_high - c_low, 0.01)
 
-        # Dynamic Asset Calibration (NIFTY vs BTC-USD)
+        # Dynamic Risk: Nifty 75 pts, BTC up to 850 pts
         is_crypto = c_close > 35000.0
         min_gap = 15.0 if is_crypto else 2.0
         min_risk = 40.0 if is_crypto else 10.0
@@ -84,7 +71,6 @@ class SMCEngine:
 
         ema_separation = abs(ema20 - ema50)
 
-        # Volume Filter check (if volume feed exists)
         vol_ok = True
         if 'vol_sma20' in c and not np.isnan(c['vol_sma20']) and c['vol_sma20'] > 0:
             vol_ok = float(c['volume']) >= (float(c['vol_sma20']) * 0.95)
@@ -96,7 +82,6 @@ class SMCEngine:
                 closed_above = c_close > ema20
                 is_green = c_close >= c_open
 
-                # Lower Wick Rejection: Buyers pushing price up from EMA
                 lower_wick = min(c_open, c_close) - c_low
                 has_rejection = (lower_wick / candle_range) >= 0.20
 
@@ -108,13 +93,13 @@ class SMCEngine:
                     
                     risk_pts = round(entry - sl, 2)
                     if min_risk <= risk_pts <= max_risk:
-                        t1_partial = round(entry + (risk_pts * 1.0), 2)  # 1:1 Partial Level
-                        t2_full = round(entry + (risk_pts * 2.0), 2)     # 1:2 Full Level
+                        t1_partial = round(entry + (risk_pts * 1.0), 2)
+                        t2_full = round(entry + (risk_pts * 2.0), 2)
                         return {
                             "signal": "BUY CE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
+                            "target_1": t2_full,
                             "target_2": t2_full,
                             "target_partial": t1_partial,
                             "points": risk_pts,
@@ -129,7 +114,6 @@ class SMCEngine:
                 closed_below = c_close < ema20
                 is_red = c_close <= c_open
 
-                # Upper Wick Rejection: Sellers pushing price down from EMA
                 upper_wick = c_high - max(c_open, c_close)
                 has_rejection = (upper_wick / candle_range) >= 0.20
 
@@ -141,13 +125,13 @@ class SMCEngine:
                     
                     risk_pts = round(sl - entry, 2)
                     if min_risk <= risk_pts <= max_risk:
-                        t1_partial = round(entry - (risk_pts * 1.0), 2)  # 1:1 Partial Level
-                        t2_full = round(entry - (risk_pts * 2.0), 2)     # 1:2 Full Level
+                        t1_partial = round(entry - (risk_pts * 1.0), 2)
+                        t2_full = round(entry - (risk_pts * 2.0), 2)
                         return {
                             "signal": "BUY PE",
                             "entry_price": entry,
                             "stop_loss": sl,
-                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
+                            "target_1": t2_full,
                             "target_2": t2_full,
                             "target_partial": t1_partial,
                             "points": risk_pts,
