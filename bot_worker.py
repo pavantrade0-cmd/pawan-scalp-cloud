@@ -1,8 +1,8 @@
 import time
 import pandas as pd
-from data.market_feed import MarketFeed
-from analysis.smc_engine import SMCEngine
-from notifications.telegram_bot import TelegramNotifier
+from market_feed import MarketFeed
+from smc_engine import SMCEngine
+from telegram_bot import TelegramNotifier
 
 def run_cloud_scanner():
     print("?? Cloud Scalper Bot Started... Monitoring 24/7.")
