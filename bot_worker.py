@@ -1,4 +1,7 @@
+import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import pandas as pd
 from datetime import datetime
 
@@ -10,6 +13,24 @@ BOT_TOKEN = "9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ"
 CHAT_ID = "7107919128"
 ASSETS = ["NIFTY 50", "BTC-USD"]
 POLL_INTERVAL = 10  # Seconds
+
+# ==========================================
+# RENDER WEB PORT BINDING (Fixes Deploy Failed)
+# ==========================================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"PAWAN AI Scalper Bot is Healthy & Running!")
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP access logging
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 # ==========================================
 # CLEAN FORMATTED TELEGRAM ALERTS (SERVER)
@@ -57,11 +78,15 @@ def format_server_sl_alert(pos: dict) -> str:
     )
 
 def main():
+    # Start web port listener in background for Render
+    web_thread = threading.Thread(target=run_health_server, daemon=True)
+    web_thread.start()
+
     notifier = TelegramNotifier(BOT_TOKEN, CHAT_ID)
     engine = SMCEngine(ema_fast=20, ema_slow=50)
     
     # Active trade state per asset
-    active_positions = {}  # { asset: trade_dict }
+    active_positions = {}
 
     print("=" * 50)
     print("🚀 PAWAN AI — SERVER WORKER RUNNING (20/50 EMA SCALPER)")
