@@ -1,139 +1,95 @@
 import pandas as pd
-import numpy as np
+from typing import Optional, Dict
 
 class SMCEngine:
-    def __init__(self):
-        pass
+    def __init__(self, ema_fast: int = 20, ema_slow: int = 50):
+        self.ema_fast = ema_fast
+        self.ema_slow = ema_slow
+        self.last_traded_bar = None
 
-    @staticmethod
-    def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculates EMA 20, EMA 50, and RSI 14 according to Scalping Pulse settings.
-        """
-        if len(df) < 50:
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculates 20 EMA and 50 EMA"""
+        if df.empty or len(df) < self.ema_slow:
             return df
+        
+        data = df.copy()
+        data['ema_20'] = data['close'].ewm(span=self.ema_fast, adjust=False).mean()
+        data['ema_50'] = data['close'].ewm(span=self.ema_slow, adjust=False).mean()
+        return data
 
-        # EMA 20 & EMA 50
-        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
-        df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+    def scan_for_setup(self, df: pd.DataFrame, asset_name: str) -> Optional[Dict]:
+        if df.empty or len(df) < (self.ema_slow + 5):
+            return None
 
-        # RSI 14
-        delta = df['close'].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
+        clean_df = df.copy()
+        if hasattr(clean_df.columns, 'levels') and len(clean_df.columns.levels) > 1:
+            clean_df.columns = [col[0].lower() for col in clean_df.columns]
+        else:
+            clean_df.columns = [str(c).lower() for c in clean_df.columns]
 
-        avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        clean_df = clean_df.dropna()
+        if len(clean_df) < (self.ema_slow + 5):
+            return None
 
-        rs = avg_gain / (avg_loss + 1e-9)
-        df['rsi'] = 100 - (100 / (1 + rs))
+        # Ensure EMAs are present
+        if 'ema_20' not in clean_df.columns or 'ema_50' not in clean_df.columns:
+            clean_df['ema_20'] = clean_df['close'].ewm(span=self.ema_fast, adjust=False).mean()
+            clean_df['ema_50'] = clean_df['close'].ewm(span=self.ema_slow, adjust=False).mean()
 
-        return df
+        curr_time = clean_df.index[-1]
+        if self.last_traded_bar == curr_time:
+            return None
 
-    def scan_for_setups(self, df: pd.DataFrame) -> dict:
-        """
-        Original Pure Scalping Pulse:
-        - Timeframe: 5m
-        - EMA 20 > EMA 50 for BUY, EMA 20 < EMA 50 for SELL
-        - Pullback: Candle wicks touch/pierce EMA 20
-        - Confirmation: Candle closes in trend direction
-        - Momentum: RSI >= 50.0 for BUY, RSI <= 50.0 for SELL
-        - Dual Targets: 1:1 Partial and 1:2 Full Target
-        """
-        default_res = {
-            "signal": "WAIT",
-            "entry_price": 0.0,
-            "stop_loss": 0.0,
-            "target_1": 0.0,
-            "target_2": 0.0,
-            "target_partial": 0.0,
-            "points": 0.0,
-            "reason": "Scanning 5m EMA 20/50 pullback...",
-            "candle_time": None
-        }
+        curr = clean_df.iloc[-1]
+        prev = clean_df.iloc[-2]
 
-        if df.empty or len(df) < 55:
-            return default_res
+        ema20 = curr['ema_20']
+        ema50 = curr['ema_50']
 
-        # Indicators Calculation
-        df = self.calculate_indicators(df)
+        # -------------------------------------------------------------
+        # 1. BULLISH SCALP (BUY CE)
+        # Condition: 20 EMA > 50 EMA, Low tapped/tested EMA 20, Close > Open & Close > EMA 20
+        # -------------------------------------------------------------
+        if ema20 > ema50:
+            if curr['low'] <= (ema20 + 2.0) and curr['close'] > ema20 and curr['close'] > curr['open']:
+                entry = round(float(curr['close']), 2)
+                sl = round(float(min(curr['low'], ema50) - 4.0), 2)
+                risk = max(10.0, entry - sl)
 
-        # Trigger Candle (Previous Closed 5m Candle: index -2)
-        c = df.iloc[-2]
-        c_prev = df.iloc[-3]
-        candle_time = df.index[-2]
+                self.last_traded_bar = curr_time
+                return {
+                    'direction': 'BUY_CE',
+                    'asset': asset_name,
+                    'entry': entry,
+                    'sl': sl,
+                    'tp1': round(entry + risk, 2),
+                    'tp2': round(entry + (2 * risk), 2),
+                    'ema_20': round(float(ema20), 2),
+                    'ema_50': round(float(ema50), 2),
+                    'time': curr_time
+                }
 
-        ema20 = float(c['ema_20'])
-        ema50 = float(c['ema_50'])
-        rsi = float(c['rsi']) if not np.isnan(c['rsi']) else 50.0
+        # -------------------------------------------------------------
+        # 2. BEARISH SCALP (BUY PE)
+        # Condition: 20 EMA < 50 EMA, High tapped/tested EMA 20, Close < Open & Close < EMA 20
+        # -------------------------------------------------------------
+        elif ema20 < ema50:
+            if curr['high'] >= (ema20 - 2.0) and curr['close'] < ema20 and curr['close'] < curr['open']:
+                entry = round(float(curr['close']), 2)
+                sl = round(float(max(curr['high'], ema50) + 4.0), 2)
+                risk = max(10.0, sl - entry)
 
-        c_open = float(c['open'])
-        c_high = float(c['high'])
-        c_low = float(c['low'])
-        c_close = float(c['close'])
+                self.last_traded_bar = curr_time
+                return {
+                    'direction': 'BUY_PE',
+                    'asset': asset_name,
+                    'entry': entry,
+                    'sl': sl,
+                    'tp1': round(entry - risk, 2),
+                    'tp2': round(entry - (2 * risk), 2),
+                    'ema_20': round(float(ema20), 2),
+                    'ema_50': round(float(ema50), 2),
+                    'time': curr_time
+                }
 
-        # Asset detection for risk sizing
-        is_crypto = c_close > 35000.0
-        min_gap = 2.0
-        min_risk = 10.0
-        max_risk = 850.0 if is_crypto else 75.0
-
-        ema_separation = abs(ema20 - ema50)
-
-        # ---------------- 1. BUY (CE) SETUP ----------------
-        if (ema20 > ema50 and ema_separation >= min_gap):
-            if rsi >= 50.0:
-                wick_touched = c_low <= (ema20 * 1.0008)
-                closed_above = c_close > ema20
-                is_green = c_close >= c_open
-
-                if wick_touched and closed_above and is_green:
-                    entry = round(c_close, 2)
-                    recent_low = min(c_low, float(c_prev['low']))
-                    sl = round(recent_low - 1.0, 2)
-                    
-                    risk_pts = round(entry - sl, 2)
-                    if min_risk <= risk_pts <= max_risk:
-                        t1_partial = round(entry + (risk_pts * 1.0), 2)  # 1:1 Partial Level
-                        t2_full = round(entry + (risk_pts * 2.0), 2)     # 1:2 Full Level
-                        return {
-                            "signal": "BUY CE",
-                            "entry_price": entry,
-                            "stop_loss": sl,
-                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
-                            "target_2": t2_full,
-                            "target_partial": t1_partial,
-                            "points": risk_pts,
-                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (&gt;50)",
-                            "candle_time": str(candle_time)
-                        }
-
-        # ---------------- 2. SELL (PE) SETUP ----------------
-        if (ema20 < ema50 and ema_separation >= min_gap):
-            if rsi <= 50.0:
-                wick_touched = c_high >= (ema20 * 0.9992)
-                closed_below = c_close < ema20
-                is_red = c_close <= c_open
-
-                if wick_touched and closed_below and is_red:
-                    entry = round(c_close, 2)
-                    recent_high = max(c_high, float(c_prev['high']))
-                    sl = round(recent_high + 1.0, 2)
-                    
-                    risk_pts = round(sl - entry, 2)
-                    if min_risk <= risk_pts <= max_risk:
-                        t1_partial = round(entry - (risk_pts * 1.0), 2)  # 1:1 Partial Level
-                        t2_full = round(entry - (risk_pts * 2.0), 2)     # 1:2 Full Level
-                        return {
-                            "signal": "BUY PE",
-                            "entry_price": entry,
-                            "stop_loss": sl,
-                            "target_1": t2_full,    # UI & Alerts draw 1:2 target directly
-                            "target_2": t2_full,
-                            "target_partial": t1_partial,
-                            "points": risk_pts,
-                            "reason": f"20 EMA Pullback + RSI {rsi:.1f} (&lt;50)",
-                            "candle_time": str(candle_time)
-                        }
-
-        return default_res
+        return None
