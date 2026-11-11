@@ -11,17 +11,62 @@ CHAT_ID = "7107919128"
 ASSETS = ["NIFTY 50", "BTC-USD"]
 POLL_INTERVAL = 10  # Seconds
 
+# ==========================================
+# CLEAN FORMATTED TELEGRAM ALERTS (SERVER)
+# ==========================================
+def format_server_entry_alert(trade: dict) -> str:
+    is_ce = "CE" in trade['direction']
+    action_color = "🟢" if is_ce else "🔴"
+    
+    return (
+        "🌐 <b>[ FROM CLOUD SERVER ]</b>\n\n"
+        f"<b>Asset :</b> {trade['asset']}\n"
+        f"<b>Action :</b> {action_color} <b>{trade['direction']}</b>\n"
+        f"<b>Entry Price :</b> ⚪ {trade['entry']:.2f}\n"
+        f"<b>Stop Loss :</b> 🔴 {trade['sl']:.2f}\n"
+        f"<b>Target 1 (1:1) :</b> 🟢 {trade['tp1']:.2f}\n"
+        f"<b>Target 2 (1:2) :</b> 🟢 {trade['tp2']:.2f}"
+    )
+
+def format_server_tp1_alert(pos: dict, curr_price: float) -> str:
+    return (
+        "🌐 <b>[ FROM CLOUD SERVER ]</b>\n\n"
+        f"<b>Asset :</b> {pos['asset']}\n"
+        f"<b>Status :</b> 🟢 <b>TARGET 1 REACHED (1:1)</b>\n"
+        f"<b>Target 1 :</b> 🟢 {pos['tp1']:.2f}\n"
+        f"<b>Current Price :</b> ⚪ {curr_price:.2f}\n"
+        f"<b>Action :</b> 🟡 Book 50% & Trail SL to Entry ({pos['entry']:.2f})"
+    )
+
+def format_server_tp2_alert(pos: dict) -> str:
+    return (
+        "🌐 <b>[ FROM CLOUD SERVER ]</b>\n\n"
+        f"<b>Asset :</b> {pos['asset']}\n"
+        f"<b>Status :</b> 🏁 <b>TARGET 2 REACHED (1:2)</b>\n"
+        f"<b>Target 2 :</b> 🟢 {pos['tp2']:.2f}\n"
+        "<b>Action :</b> 🟢 Trade Successfully Closed"
+    )
+
+def format_server_sl_alert(pos: dict) -> str:
+    return (
+        "🌐 <b>[ FROM CLOUD SERVER ]</b>\n\n"
+        f"<b>Asset :</b> {pos['asset']}\n"
+        f"<b>Status :</b> 🔴 <b>STOP LOSS HIT</b>\n"
+        f"<b>Exit Price :</b> 🔴 {pos['sl']:.2f}\n"
+        "<b>Action :</b> 🔴 Position Closed"
+    )
+
 def main():
     notifier = TelegramNotifier(BOT_TOKEN, CHAT_ID)
     engine = SMCEngine(ema_fast=20, ema_slow=50)
     
-    # Track positions per asset
+    # Active trade state per asset
     active_positions = {}  # { asset: trade_dict }
 
     print("=" * 50)
     print("🚀 PAWAN AI — SERVER WORKER RUNNING (20/50 EMA SCALPER)")
     print("=" * 50)
-    notifier.send_message("🟢 *PAWAN AI Server Worker Started* (20/50 EMA Scalper Active)")
+    notifier.send_message("🌐 <b>[ FROM CLOUD SERVER ]</b>\n\n🟢 <b>Server Worker Online & Monitoring 5M Candles</b>")
 
     while True:
         try:
@@ -49,31 +94,14 @@ def main():
                         if tp1_hit:
                             pos['tp1_hit'] = True
                             print(f"[{asset}] 🎯 TARGET 1 HIT @ {pos['tp1']}")
-                            msg = (
-                                f"🎯 *PAWAN AI — TARGET 1 HIT (1:1)* 🎯\n"
-                                f"━━━━━━━━━━━━━━━━━━━\n"
-                                f"Asset: {asset}\n"
-                                f"Signal: {direction}\n"
-                                f"Target 1: {pos['tp1']}\n"
-                                f"Current Price: {curr_price:.2f}\n"
-                                f"Action: Book 50% profit & Trail SL to Entry ({pos['entry']})\n"
-                                f"━━━━━━━━━━━━━━━━━━━"
-                            )
+                            msg = format_server_tp1_alert(pos, curr_price)
                             notifier.send_message(msg)
 
                     # Check Target 2 (Full Target)
                     tp2_hit = (curr_high >= pos['tp2']) if direction == 'BUY_CE' else (curr_low <= pos['tp2'])
                     if tp2_hit:
                         print(f"[{asset}] 🏁 TARGET 2 HIT @ {pos['tp2']}")
-                        msg = (
-                            f"🏁 *PAWAN AI — FULL TARGET 2 HIT (1:2)* 🏁\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"Asset: {asset}\n"
-                            f"Signal: {direction}\n"
-                            f"Target 2: {pos['tp2']}\n"
-                            f"Trade Status: Fully Booked & Closed ✅\n"
-                            f"━━━━━━━━━━━━━━━━━━━"
-                        )
+                        msg = format_server_tp2_alert(pos)
                         notifier.send_message(msg)
                         del active_positions[asset]
                         continue
@@ -82,21 +110,13 @@ def main():
                     sl_hit = (curr_low <= pos['sl']) if direction == 'BUY_CE' else (curr_high >= pos['sl'])
                     if sl_hit:
                         print(f"[{asset}] 🛑 STOP LOSS HIT @ {pos['sl']}")
-                        msg = (
-                            f"🛑 *PAWAN AI — STOP LOSS HIT* 🛑\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"Asset: {asset}\n"
-                            f"Signal: {direction}\n"
-                            f"Exit Price: {pos['sl']}\n"
-                            f"Trade Status: Closed\n"
-                            f"━━━━━━━━━━━━━━━━━━━"
-                        )
+                        msg = format_server_sl_alert(pos)
                         notifier.send_message(msg)
                         del active_positions[asset]
                         continue
 
                 # -------------------------------------------------------------
-                # 2. SCAN NEW TRADE (If no trade active for this asset)
+                # 2. SCAN NEW TRADE (Closed-candle confirmed setup)
                 # -------------------------------------------------------------
                 else:
                     trade = engine.scan_for_setup(df, asset)
@@ -112,19 +132,7 @@ def main():
                             'tp1_hit': False
                         }
 
-                        msg = (
-                            f"🚀 *PAWAN AI — 20/50 EMA SCALPER*\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎯 *Asset:* {trade['asset']}\n"
-                            f"⚡ *Signal:* {trade['direction']}\n"
-                            f"📍 *Entry:* {trade['entry']}\n"
-                            f"🛑 *Stop Loss:* {trade['sl']}\n"
-                            f"🎯 *Target 1 (1:1):* {trade['tp1']}\n"
-                            f"🏁 *Target 2 (1:2):* {trade['tp2']}\n"
-                            f"📈 *EMA 20:* {trade.get('ema_20', 'N/A')} | *EMA 50:* {trade.get('ema_50', 'N/A')}\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n"
-                            f"Status: Pullback Bounce Confirmed"
-                        )
+                        msg = format_server_entry_alert(trade)
                         notifier.send_message(msg)
 
             time.sleep(POLL_INTERVAL)
