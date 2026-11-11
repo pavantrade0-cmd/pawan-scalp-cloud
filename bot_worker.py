@@ -1,154 +1,140 @@
-import os
 import time
-import datetime
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import yfinance as yf
 import pandas as pd
+from datetime import datetime
+
 from smc_engine import SMCEngine
+from market_feed import MarketFeed
 from telegram_bot import TelegramNotifier
 
-# --- 1. DUMMY WEB SERVER FOR RENDER FREE WEB SERVICE HEALTH CHECK ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"PAWAN SCALPER BOT 24/7 ONLINE - OK")
+BOT_TOKEN = "9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ"
+CHAT_ID = "7107919128"
+ASSETS = ["NIFTY 50", "BTC-USD"]
+POLL_INTERVAL = 10  # Seconds
 
-    def log_message(self, format, *args):
-        return  # Suppress HTTP access logs
+def main():
+    notifier = TelegramNotifier(BOT_TOKEN, CHAT_ID)
+    engine = SMCEngine(ema_fast=20, ema_slow=50)
+    
+    # Track positions per asset
+    active_positions = {}  # { asset: trade_dict }
 
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    print("=" * 50)
+    print("🚀 PAWAN AI — SERVER WORKER RUNNING (20/50 EMA SCALPER)")
+    print("=" * 50)
+    notifier.send_message("🟢 *PAWAN AI Server Worker Started* (20/50 EMA Scalper Active)")
 
-# Start Web Server in background daemon thread (Keeps Render Free Service Alive)
-threading.Thread(target=run_web_server, daemon=True).start()
+    while True:
+        try:
+            for asset in ASSETS:
+                df = MarketFeed.get_latest_candles(asset, timeframe="5m")
+                if df.empty or len(df) < 55:
+                    continue
 
-# --- 2. TRADING BOT ENGINE ---
-tg = TelegramNotifier(
-    bot_token="9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ",
-    chat_id="7107919128"
-)
-engine = SMCEngine()
+                df = engine.calculate_indicators(df)
+                latest = df.iloc[-1]
+                curr_price = float(latest['close'])
+                curr_high = float(latest['high'])
+                curr_low = float(latest['low'])
 
-ASSETS = [
-    {"display": "BTC-USD", "symbol": "BTC-USD", "is_crypto": True},
-    {"display": "NIFTY 50", "symbol": "^NSEI", "is_crypto": False}
-]
+                # -------------------------------------------------------------
+                # 1. MONITOR ACTIVE POSITION (TP1, TP2, SL)
+                # -------------------------------------------------------------
+                if asset in active_positions:
+                    pos = active_positions[asset]
+                    direction = pos['direction']
 
-active_trades = {a["display"]: None for a in ASSETS}
-last_alerted_candle = {a["display"]: None for a in ASSETS}
+                    # Check Target 1
+                    if not pos['tp1_hit']:
+                        tp1_hit = (curr_high >= pos['tp1']) if direction == 'BUY_CE' else (curr_low <= pos['tp1'])
+                        if tp1_hit:
+                            pos['tp1_hit'] = True
+                            print(f"[{asset}] 🎯 TARGET 1 HIT @ {pos['tp1']}")
+                            msg = (
+                                f"🎯 *PAWAN AI — TARGET 1 HIT (1:1)* 🎯\n"
+                                f"━━━━━━━━━━━━━━━━━━━\n"
+                                f"Asset: {asset}\n"
+                                f"Signal: {direction}\n"
+                                f"Target 1: {pos['tp1']}\n"
+                                f"Current Price: {curr_price:.2f}\n"
+                                f"Action: Book 50% profit & Trail SL to Entry ({pos['entry']})\n"
+                                f"━━━━━━━━━━━━━━━━━━━"
+                            )
+                            notifier.send_message(msg)
 
-def is_market_open():
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_ist = now_utc + datetime.timedelta(hours=5, minutes=30)
-    if now_ist.weekday() >= 5:
-        return False
-    market_start = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
-    market_end = now_ist.replace(hour=15, minute=30, second=0, microsecond=0)
-    return market_start <= now_ist <= market_end
-
-def fetch_data(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="2d", interval="5m")
-        if df.empty or len(df) < 55:
-            return pd.DataFrame()
-        df.columns = [c.lower() for c in df.columns]
-        return df
-    except Exception as e:
-        print(f"[FETCH ERROR {symbol}]: {e}")
-        return pd.DataFrame()
-
-print("🚀 PAWAN 24/7 CLOUD WORKER ACTIVE...")
-tg.send_message("🌐 <b>PAWAN CLOUD SCALPER 24/7 ONLINE</b>\nBot monitoring BTC-USD & NIFTY 50 (Free Cloud Web Service Active).")
-
-while True:
-    try:
-        for asset in ASSETS:
-            name = asset["display"]
-            sym = asset["symbol"]
-            is_crypto = asset["is_crypto"]
-
-            if not is_crypto and not is_market_open():
-                continue
-
-            df = fetch_data(sym)
-            if df.empty or len(df) < 55:
-                continue
-
-            df = engine.calculate_indicators(df)
-            
-            curr_bar = df.iloc[-1]
-            curr_high = float(curr_bar['high'])
-            curr_low = float(curr_bar['low'])
-
-            # Manage Active Trade
-            trade = active_trades[name]
-            if trade is not None:
-                direction = trade["signal"]
-                entry = trade["entry_price"]
-                sl = trade["stop_loss"]
-                tp1 = trade.get("target_partial")
-                tp2 = trade.get("target_2", trade.get("target_1"))
-                risk = trade.get("points", 0)
-                tp1_hit = trade.get("tp1_hit", False)
-
-                if direction == "BUY CE":
-                    if not tp1_hit and curr_high >= tp1:
-                        trade["tp1_hit"] = True
-                        tg.send_partial_tp_alert(symbol=name, direction=direction, exit_price=tp1, gain_pts=risk * 1.0)
-
-                    if curr_high >= tp2:
-                        active_trades[name] = None
-                        tg.send_exit_alert(symbol=name, direction=direction, outcome=f"FULL TARGET HIT (1:2) (+{risk * 2:.0f} pts)", exit_price=tp2)
+                    # Check Target 2 (Full Target)
+                    tp2_hit = (curr_high >= pos['tp2']) if direction == 'BUY_CE' else (curr_low <= pos['tp2'])
+                    if tp2_hit:
+                        print(f"[{asset}] 🏁 TARGET 2 HIT @ {pos['tp2']}")
+                        msg = (
+                            f"🏁 *PAWAN AI — FULL TARGET 2 HIT (1:2)* 🏁\n"
+                            f"━━━━━━━━━━━━━━━━━━━\n"
+                            f"Asset: {asset}\n"
+                            f"Signal: {direction}\n"
+                            f"Target 2: {pos['tp2']}\n"
+                            f"Trade Status: Fully Booked & Closed ✅\n"
+                            f"━━━━━━━━━━━━━━━━━━━"
+                        )
+                        notifier.send_message(msg)
+                        del active_positions[asset]
                         continue
 
-                    if curr_low <= sl:
-                        active_trades[name] = None
-                        tg.send_exit_alert(symbol=name, direction=direction, outcome=f"STOP LOSS HIT (-{risk:.0f} pts)", exit_price=sl)
+                    # Check Stop Loss
+                    sl_hit = (curr_low <= pos['sl']) if direction == 'BUY_CE' else (curr_high >= pos['sl'])
+                    if sl_hit:
+                        print(f"[{asset}] 🛑 STOP LOSS HIT @ {pos['sl']}")
+                        msg = (
+                            f"🛑 *PAWAN AI — STOP LOSS HIT* 🛑\n"
+                            f"━━━━━━━━━━━━━━━━━━━\n"
+                            f"Asset: {asset}\n"
+                            f"Signal: {direction}\n"
+                            f"Exit Price: {pos['sl']}\n"
+                            f"Trade Status: Closed\n"
+                            f"━━━━━━━━━━━━━━━━━━━"
+                        )
+                        notifier.send_message(msg)
+                        del active_positions[asset]
                         continue
 
-                elif direction == "BUY PE":
-                    if not tp1_hit and curr_low <= tp1:
-                        trade["tp1_hit"] = True
-                        tg.send_partial_tp_alert(symbol=name, direction=direction, exit_price=tp1, gain_pts=risk * 1.0)
+                # -------------------------------------------------------------
+                # 2. SCAN NEW TRADE (If no trade active for this asset)
+                # -------------------------------------------------------------
+                else:
+                    trade = engine.scan_for_setup(df, asset)
+                    if trade:
+                        print(f"[{asset}] 🔥 NEW ENTRY: {trade['direction']} @ {trade['entry']}")
+                        active_positions[asset] = {
+                            'asset': trade['asset'],
+                            'direction': trade['direction'],
+                            'entry': float(trade['entry']),
+                            'sl': float(trade['sl']),
+                            'tp1': float(trade['tp1']),
+                            'tp2': float(trade['tp2']),
+                            'tp1_hit': False
+                        }
 
-                    if curr_low <= tp2:
-                        active_trades[name] = None
-                        tg.send_exit_alert(symbol=name, direction=direction, outcome=f"FULL TARGET HIT (1:2) (+{risk * 2:.0f} pts)", exit_price=tp2)
-                        continue
+                        msg = (
+                            f"🚀 *PAWAN AI — 20/50 EMA SCALPER*\n"
+                            f"━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎯 *Asset:* {trade['asset']}\n"
+                            f"⚡ *Signal:* {trade['direction']}\n"
+                            f"📍 *Entry:* {trade['entry']}\n"
+                            f"🛑 *Stop Loss:* {trade['sl']}\n"
+                            f"🎯 *Target 1 (1:1):* {trade['tp1']}\n"
+                            f"🏁 *Target 2 (1:2):* {trade['tp2']}\n"
+                            f"📈 *EMA 20:* {trade.get('ema_20', 'N/A')} | *EMA 50:* {trade.get('ema_50', 'N/A')}\n"
+                            f"━━━━━━━━━━━━━━━━━━━\n"
+                            f"Status: Pullback Bounce Confirmed"
+                        )
+                        notifier.send_message(msg)
 
-                    if curr_high >= sl:
-                        active_trades[name] = None
-                        tg.send_exit_alert(symbol=name, direction=direction, outcome=f"STOP LOSS HIT (-{risk:.0f} pts)", exit_price=sl)
-                        continue
+            time.sleep(POLL_INTERVAL)
 
-                continue
+        except KeyboardInterrupt:
+            print("\nWorker stopped by user.")
+            break
+        except Exception as e:
+            print(f"[Worker Exception]: {e}")
+            time.sleep(5)
 
-            # Scan New Setups
-            setup = engine.scan_for_setups(df)
-            if setup.get("signal") in ["BUY CE", "BUY PE"]:
-                candle_timestamp = str(df.index[-2])
-                if last_alerted_candle[name] != candle_timestamp:
-                    last_alerted_candle[name] = candle_timestamp
-                    setup["tp1_hit"] = False
-                    active_trades[name] = setup
-
-                    tg.send_entry_alert(
-                        symbol=name,
-                        direction=setup["signal"],
-                        entry=setup["entry_price"],
-                        sl=setup["stop_loss"],
-                        tp1=setup["target_partial"],
-                        tp2=setup["target_2"],
-                        reason=setup["reason"]
-                    )
-
-    except Exception as e:
-        print(f"[WORKER TICK ERROR]: {e}")
-
-    time.sleep(15)
+if __name__ == "__main__":
+    main()
