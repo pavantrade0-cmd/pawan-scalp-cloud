@@ -94,6 +94,10 @@ def run_bot():
     active_trade = None
 
     print("[Cloud Server] NIFTY Option Buying Scanner Started...")
+    tg.send_message(
+        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
+        "<b>Status:</b> Cloud Bot Connected (Option Buying Active)"
+    )
 
     while True:
         try:
