@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -11,7 +12,33 @@ from telegram_bot import TelegramNotifier
 BOT_TOKEN = "9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ"
 CHAT_ID = "7107919128"
 POLL_INTERVAL = 5  # Seconds
+STATE_FILE = "active_trade.json"
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+# ==========================================
+# PERSISTENT TRADE STATE (SURVIVES RESTARTS)
+# ==========================================
+def load_active_trade():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def save_active_trade(trade_data):
+    try:
+        if trade_data is None:
+            if os.path.exists(STATE_FILE):
+                os.remove(STATE_FILE)
+        else:
+            with open(STATE_FILE, "w") as f:
+                json.dump(trade_data, f)
+    except Exception as e:
+        print(f"[State Save Error]: {e}")
 
 
 # ==========================================
@@ -39,7 +66,7 @@ def start_health_server():
 # CLEAN BOLD TELEGRAM ALERTS (CLOUD SERVER)
 # ==========================================
 def format_cloud_entry_alert(trade: dict) -> str:
-    opt_side = trade["chart_type"]  # "CE" or "PE"
+    opt_side = trade["chart_type"]
     return (
         "<b>[ FROM CLOUD SERVER ]</b>\n\n"
         f"<b>Contract:</b> {trade['asset']}\n"
@@ -57,7 +84,7 @@ def format_cloud_tp1_alert(tr: dict, curr_price: float) -> str:
         f"<b>Contract:</b> {tr['asset']}\n"
         f"<b>Status:</b> Target 1 Reached (<b>{tr['tp1']:.2f}</b>)\n"
         f"<b>Current Price:</b> <b>{curr_price:.2f}</b>\n"
-        f"<b>Action:</b> Book 50% and trail SL to <b>{tr['entry']:.2f}</b>"
+        f"<b>Action:</b> Book 50% & SL Trailed to Entry (<b>{tr['entry']:.2f}</b>)"
     )
 
 
@@ -66,42 +93,66 @@ def format_cloud_tp2_alert(tr: dict) -> str:
         "<b>[ FROM CLOUD SERVER ]</b>\n\n"
         f"<b>Contract:</b> {tr['asset']}\n"
         f"<b>Status:</b> Target 2 Reached (<b>{tr['tp2']:.2f}</b>)\n"
-        "<b>Action:</b> Trade Closed"
+        "<b>Action:</b> Full Profit Booked — Trade Closed"
     )
 
 
-def format_cloud_sl_alert(tr: dict) -> str:
+def format_cloud_sl_alert(tr: dict, exit_price: float) -> str:
+    label = "Trailing SL Hit at Cost" if tr.get("tp1_hit") else "Stop Loss Hit"
     return (
         "<b>[ FROM CLOUD SERVER ]</b>\n\n"
         f"<b>Contract:</b> {tr['asset']}\n"
-        f"<b>Status:</b> Stop Loss Hit (<b>{tr['sl']:.2f}</b>)\n"
+        f"<b>Status:</b> {label} (<b>{tr['sl']:.2f}</b>)\n"
+        f"<b>Exit Price:</b> <b>{exit_price:.2f}</b>\n"
         "<b>Action:</b> Position Closed"
     )
 
 
 def is_market_open() -> bool:
     now = datetime.now(IST)
-    if now.weekday() >= 5:  # Saturday / Sunday
+    if now.weekday() >= 5:
         return False
     mins = now.hour * 60 + now.minute
     return (9 * 60 + 20) <= mins <= (15 * 60 + 15)
+
+
+def get_tracked_option_df(feed: DhanDataFeed, active_trade: dict, bundle: dict):
+    """Fetches exact open option contract data even if ATM strike shifts."""
+    sec_id = active_trade.get("security_id")
+    if sec_id and hasattr(feed, "fetch_intraday_candles"):
+        try:
+            df = feed.fetch_intraday_candles(sec_id, exchange_segment="NSE_FNO", instrument="OPTIDX")
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+    return bundle["ce_df"] if active_trade["chart_type"] == "CE" else bundle["pe_df"]
 
 
 def run_bot():
     feed = DhanDataFeed()
     engine = SMCEngine(ema_fast=20, ema_slow=50)
     tg = TelegramNotifier(BOT_TOKEN, CHAT_ID)
-    active_trade = None
+    active_trade = load_active_trade()
 
     print("[Cloud Server] NIFTY Option Buying Scanner Started...")
     tg.send_message(
         "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        "<b>Status:</b> Cloud Bot Connected (Option Buying Active)"
+        "<b>Status:</b> Cloud Bot Connected (Option Buying + Auto SL/TP Active)"
     )
 
     while True:
         try:
             if not is_market_open():
+                if active_trade is not None and datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 16:
+                    tg.send_message(
+                        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
+                        f"<b>Contract:</b> {active_trade['asset']}\n"
+                        "<b>Status:</b> Intraday Auto Square-Off (3:15 PM)\n"
+                        "<b>Action:</b> Position Closed"
+                    )
+                    active_trade = None
+                    save_active_trade(None)
                 time.sleep(30)
                 continue
 
@@ -114,27 +165,35 @@ def run_bot():
             ce_df = engine.calculate_indicators(bundle["ce_df"])
             pe_df = engine.calculate_indicators(bundle["pe_df"])
 
-            # Monitor active CE or PE trade
+            # 1. Monitor Active Open Position (Exact Strike + Auto Trailing SL)
             if active_trade is not None:
-                target_df = ce_df if active_trade["chart_type"] == "CE" else pe_df
-                if not target_df.empty:
+                target_df = get_tracked_option_df(feed, active_trade, bundle)
+                if target_df is not None and not target_df.empty:
                     latest = target_df.iloc[-1]
                     curr_price = float(latest["close"])
                     curr_high = float(latest["high"])
                     curr_low = float(latest["low"])
 
-                    if not active_trade["tp1_hit"] and curr_high >= active_trade["tp1"]:
+                    # Target 1 Check + Trail SL to Entry
+                    if not active_trade["tp1_hit"] and (curr_high >= active_trade["tp1"] or curr_price >= active_trade["tp1"]):
                         active_trade["tp1_hit"] = True
+                        active_trade["sl"] = active_trade["entry"]
+                        save_active_trade(active_trade)
                         tg.send_message(format_cloud_tp1_alert(active_trade, curr_price))
 
-                    if curr_high >= active_trade["tp2"]:
+                    # Target 2 Check
+                    if curr_high >= active_trade["tp2"] or curr_price >= active_trade["tp2"]:
                         tg.send_message(format_cloud_tp2_alert(active_trade))
                         active_trade = None
-                    elif curr_low <= active_trade["sl"]:
-                        tg.send_message(format_cloud_sl_alert(active_trade))
-                        active_trade = None
+                        save_active_trade(None)
 
-            # Scan for new Option Buying setup
+                    # Stop Loss Check (Checks both live LTP & candle low)
+                    elif curr_price <= active_trade["sl"] or curr_low <= active_trade["sl"]:
+                        tg.send_message(format_cloud_sl_alert(active_trade, curr_price))
+                        active_trade = None
+                        save_active_trade(None)
+
+            # 2. Scan for New Option Buying Setup
             else:
                 trade = engine.scan_option_buying_setup(
                     spot_df=spot_df,
@@ -144,15 +203,18 @@ def run_bot():
                     pe_info=bundle["pe_info"]
                 )
                 if trade:
+                    opt_info = bundle["ce_info"] if trade["chart_type"] == "CE" else bundle["pe_info"]
                     active_trade = {
                         "chart_type": trade["chart_type"],
                         "asset": trade["asset"],
+                        "security_id": opt_info.get("security_id") or opt_info.get("SECURITY_ID"),
                         "entry": float(trade["entry"]),
                         "sl": float(trade["sl"]),
                         "tp1": float(trade["tp1"]),
                         "tp2": float(trade["tp2"]),
                         "tp1_hit": False
                     }
+                    save_active_trade(active_trade)
                     tg.send_message(format_cloud_entry_alert(trade))
 
         except Exception as e:
