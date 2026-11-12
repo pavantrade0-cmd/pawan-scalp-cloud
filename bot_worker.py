@@ -1,25 +1,38 @@
 import os
 import time
 import threading
-from datetime import datetime
-import pytz
-from flask import Flask
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime, timezone, timedelta
 
-from market_feed import DhanDataFeed
 from smc_engine import SMCEngine
+from market_feed import DhanDataFeed
 from telegram_bot import TelegramNotifier
 
-app = Flask(__name__)
-IST = pytz.timezone("Asia/Kolkata")
+BOT_TOKEN = "9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ"
+CHAT_ID = "7107919128"
+POLL_INTERVAL = 5  # Seconds
+IST = timezone(timedelta(hours=5, minutes=30))
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-feed = DhanDataFeed()
-engine = SMCEngine(ema_fast=20, ema_slow=50)
-tg = TelegramNotifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+# ==========================================
+# RENDER WEB PORT BINDING
+# ==========================================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"PAWAN NIFTY OPTION SCALPER CLOUD ACTIVE")
 
-active_trade = None
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"[Render Port] Bound to 0.0.0.0:{port}")
+    server.serve_forever()
 
 
 # ==========================================
@@ -68,15 +81,19 @@ def format_cloud_sl_alert(tr: dict) -> str:
 
 def is_market_open() -> bool:
     now = datetime.now(IST)
-    if now.weekday() >= 5:
+    if now.weekday() >= 5:  # Saturday / Sunday
         return False
     mins = now.hour * 60 + now.minute
     return (9 * 60 + 20) <= mins <= (15 * 60 + 15)
 
 
-def scanner_loop():
-    global active_trade
-    print("[Cloud Server] Option Buying Scanner Started...")
+def run_bot():
+    feed = DhanDataFeed()
+    engine = SMCEngine(ema_fast=20, ema_slow=50)
+    tg = TelegramNotifier(BOT_TOKEN, CHAT_ID)
+    active_trade = None
+
+    print("[Cloud Server] NIFTY Option Buying Scanner Started...")
 
     while True:
         try:
@@ -86,13 +103,14 @@ def scanner_loop():
 
             bundle = feed.fetch_all_three_charts()
             if not bundle:
-                time.sleep(5)
+                time.sleep(POLL_INTERVAL)
                 continue
 
             spot_df = engine.calculate_indicators(bundle["spot_df"])
             ce_df = engine.calculate_indicators(bundle["ce_df"])
             pe_df = engine.calculate_indicators(bundle["pe_df"])
 
+            # Monitor active CE or PE trade
             if active_trade is not None:
                 target_df = ce_df if active_trade["chart_type"] == "CE" else pe_df
                 if not target_df.empty:
@@ -111,6 +129,8 @@ def scanner_loop():
                     elif curr_low <= active_trade["sl"]:
                         tg.send_message(format_cloud_sl_alert(active_trade))
                         active_trade = None
+
+            # Scan for new Option Buying setup
             else:
                 trade = engine.scan_option_buying_setup(
                     spot_df=spot_df,
@@ -132,18 +152,11 @@ def scanner_loop():
                     tg.send_message(format_cloud_entry_alert(trade))
 
         except Exception as e:
-            print(f"[Cloud Loop Error]: {e}")
+            print(f"[Cloud Worker Error]: {e}")
 
-        time.sleep(5)
+        time.sleep(POLL_INTERVAL)
 
-
-@app.route("/")
-def health_check():
-    return {"status": "running", "service": "pawan-scalp-bot-options-only"}
-
-
-threading.Thread(target=scanner_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    threading.Thread(target=start_health_server, daemon=True).start()
+    run_bot()
