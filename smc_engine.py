@@ -1,5 +1,5 @@
+# engine/smc_engine.py
 import pandas as pd
-from typing import Optional, Dict
 
 class SMCEngine:
     def __init__(self, ema_fast: int = 20, ema_slow: int = 50):
@@ -8,92 +8,112 @@ class SMCEngine:
         self.last_traded_bar = None
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculates 20 EMA and 50 EMA on clean price data"""
-        if df.empty or len(df) < self.ema_slow:
+        """Calculates 20 EMA and 50 EMA on any 5M DataFrame (Spot, CE, or PE)."""
+        if df is None or df.empty:
             return df
-        
-        data = df.copy()
-        data['ema_20'] = data['close'].ewm(span=self.ema_fast, adjust=False).mean()
-        data['ema_50'] = data['close'].ewm(span=self.ema_slow, adjust=False).mean()
-        return data
+        df = df.copy()
+        df["ema_fast"] = df["close"].ewm(span=self.ema_fast, adjust=False).mean()
+        df["ema_slow"] = df["close"].ewm(span=self.ema_slow, adjust=False).mean()
+        return df
 
-    def scan_for_setup(self, df: pd.DataFrame, asset_name: str) -> Optional[Dict]:
-        if df.empty or len(df) < (self.ema_slow + 5):
+    def _check_option_bounce(self, opt_df: pd.DataFrame) -> dict | None:
+        """Checks 20/50 EMA bullish pullback bounce on the last closed 5M option candle."""
+        if opt_df is None or len(opt_df) < 55:
             return None
 
-        clean_df = df.copy()
-        if hasattr(clean_df.columns, 'levels') and len(clean_df.columns.levels) > 1:
-            clean_df.columns = [col[0].lower() for col in clean_df.columns]
-        else:
-            clean_df.columns = [str(c).lower() for c in clean_df.columns]
+        c_prev = opt_df.iloc[-2]   # Last closed 5M candle
+        c_before = opt_df.iloc[-3]
 
-        clean_df = clean_df.dropna(subset=['open', 'high', 'low', 'close'])
-        if len(clean_df) < (self.ema_slow + 5):
+        ema20 = float(c_prev["ema_fast"])
+        ema50 = float(c_prev["ema_slow"])
+        c_open = float(c_prev["open"])
+        c_high = float(c_prev["high"])
+        c_low = float(c_prev["low"])
+        c_close = float(c_prev["close"])
+
+        # 1. Option trend must be bullish (20 EMA > 50 EMA)
+        if ema20 <= ema50:
             return None
 
-        # Ensure EMAs are computed
-        if 'ema_20' not in clean_df.columns or 'ema_50' not in clean_df.columns:
-            clean_df['ema_20'] = clean_df['close'].ewm(span=self.ema_fast, adjust=False).mean()
-            clean_df['ema_50'] = clean_df['close'].ewm(span=self.ema_slow, adjust=False).mean()
+        # 2. Pullback touch to 20 EMA zone & Bullish close above 20 EMA
+        touched_20ema = (c_low <= ema20 * 1.005) or (float(c_before["low"]) <= float(c_before["ema_fast"]) * 1.005)
+        bullish_close = (c_close > c_open) and (c_close > ema20)
 
-        # Closed confirmed 5m bar (-2) prevents tick desync between desktop and server
-        confirmed_bar = clean_df.iloc[-2]
-        bar_time = clean_df.index[-2]
-
-        if self.last_traded_bar == bar_time:
+        if not (touched_20ema and bullish_close):
             return None
 
-        ema20 = float(confirmed_bar['ema_20'])
-        ema50 = float(confirmed_bar['ema_50'])
-        bar_close = float(confirmed_bar['close'])
-        bar_open = float(confirmed_bar['open'])
-        bar_low = float(confirmed_bar['low'])
-        bar_high = float(confirmed_bar['high'])
+        # 3. Entry, SL, TP1 (1:1), TP2 (1:2) directly on Option Premium
+        entry = round(c_close, 2)
+        raw_sl = min(c_low, float(c_before["low"])) - 1.5
+        risk = entry - raw_sl
 
-        # -------------------------------------------------------------
-        # 1. BULLISH SCALP (BUY CE)
-        # Condition: 20 EMA > 50 EMA, Low tests EMA 20, Close > Open & Close > EMA 20
-        # -------------------------------------------------------------
-        if ema20 > ema50:
-            if bar_low <= (ema20 + 2.0) and bar_close > ema20 and bar_close > bar_open:
-                entry = round(bar_close, 2)
-                sl = round(float(min(bar_low, ema50) - 4.0), 2)
-                risk = max(10.0, entry - sl)
+        # Enforce clean option buying risk boundaries (min 6 pts, max 25 pts)
+        if risk < 6.0:
+            risk = 6.0
+            raw_sl = entry - risk
+        elif risk > 25.0:
+            risk = 25.0
+            raw_sl = entry - risk
 
-                self.last_traded_bar = bar_time
+        sl = round(raw_sl, 2)
+        tp1 = round(entry + risk, 2)
+        tp2 = round(entry + (risk * 2.0), 2)
+
+        return {
+            "bar_time": opt_df.index[-2],
+            "entry": entry,
+            "sl": sl,
+            "tp1": tp1,
+            "tp2": tp2
+        }
+
+    def scan_option_buying_setup(
+        self,
+        spot_df: pd.DataFrame,
+        ce_df: pd.DataFrame,
+        pe_df: pd.DataFrame,
+        ce_info: dict,
+        pe_info: dict
+    ) -> dict | None:
+        """Dual-Confirmation Scanner: Index Trend + Option Premium 20 EMA Bounce."""
+        if spot_df is None or len(spot_df) < 55:
+            return None
+
+        spot_prev = spot_df.iloc[-2]
+        spot_ema20 = float(spot_prev["ema_fast"])
+        spot_ema50 = float(spot_prev["ema_slow"])
+        spot_close = float(spot_prev["close"])
+
+        # CASE 1: NIFTY INDEX BULLISH -> CHECK CALL (CE) CHART ONLY
+        if spot_ema20 > spot_ema50 and spot_close > spot_ema20:
+            ce_signal = self._check_option_bounce(ce_df)
+            if ce_signal and ce_signal["bar_time"] != self.last_traded_bar:
+                self.last_traded_bar = ce_signal["bar_time"]
                 return {
-                    'direction': 'BUY_CE',
-                    'asset': asset_name,
-                    'entry': entry,
-                    'sl': sl,
-                    'tp1': round(entry + risk, 2),
-                    'tp2': round(entry + (2 * risk), 2),
-                    'ema_20': round(ema20, 2),
-                    'ema_50': round(ema50, 2),
-                    'time': bar_time
+                    "chart_type": "CE",
+                    "asset": ce_info["symbol"],
+                    "spot_price": spot_close,
+                    "direction": "BUY_CE",
+                    "entry": ce_signal["entry"],
+                    "sl": ce_signal["sl"],
+                    "tp1": ce_signal["tp1"],
+                    "tp2": ce_signal["tp2"]
                 }
 
-        # -------------------------------------------------------------
-        # 2. BEARISH SCALP (BUY PE)
-        # Condition: 20 EMA < 50 EMA, High tests EMA 20, Close < Open & Close < EMA 20
-        # -------------------------------------------------------------
-        elif ema20 < ema50:
-            if bar_high >= (ema20 - 2.0) and bar_close < ema20 and bar_close < bar_open:
-                entry = round(bar_close, 2)
-                sl = round(float(max(bar_high, ema50) + 4.0), 2)
-                risk = max(10.0, sl - entry)
-
-                self.last_traded_bar = bar_time
+        # CASE 2: NIFTY INDEX BEARISH -> CHECK PUT (PE) CHART ONLY
+        elif spot_ema20 < spot_ema50 and spot_close < spot_ema20:
+            pe_signal = self._check_option_bounce(pe_df)
+            if pe_signal and pe_signal["bar_time"] != self.last_traded_bar:
+                self.last_traded_bar = pe_signal["bar_time"]
                 return {
-                    'direction': 'BUY_PE',
-                    'asset': asset_name,
-                    'entry': entry,
-                    'sl': sl,
-                    'tp1': round(entry - risk, 2),
-                    'tp2': round(entry - (2 * risk), 2),
-                    'ema_20': round(ema20, 2),
-                    'ema_50': round(ema50, 2),
-                    'time': bar_time
+                    "chart_type": "PE",
+                    "asset": pe_info["symbol"],
+                    "spot_price": spot_close,
+                    "direction": "BUY_PE",
+                    "entry": pe_signal["entry"],
+                    "sl": pe_signal["sl"],
+                    "tp1": pe_signal["tp1"],
+                    "tp2": pe_signal["tp2"]
                 }
 
         return None
