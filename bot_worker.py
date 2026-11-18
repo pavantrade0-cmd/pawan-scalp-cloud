@@ -3,7 +3,7 @@ import time
 import threading
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from market_feed import DhanFeed
 from smc_engine import InstitutionalLevelEngine
@@ -79,21 +79,30 @@ def run_bot():
     last_btc_candle = None
     nifty_trades_today = 0
     btc_trades_today = 0
-    current_day = None
+    current_nifty_day = None
+    current_btc_session = None
 
-    send_telegram(f"{HEADER}Cloud Bot Active\nMarkets : NIFTY 50 + BTC")
+    send_telegram(f"{HEADER}Cloud Bot Active\nMarkets : NIFTY 50 + BTC (6:30 PM IST)")
 
     while True:
         try:
             now = datetime.now(IST)
-            if current_day != now.date():
-                current_day = now.date()
+
+            # Reset Nifty daily counter at midnight IST
+            if current_nifty_day != now.date():
+                current_nifty_day = now.date()
                 nifty_trades_today = 0
-                btc_trades_today = 0
                 nifty_trade = None
 
+            # Reset BTC session counter at 6:30 PM IST
+            today_630 = now.replace(hour=18, minute=30, second=0, microsecond=0)
+            btc_session_date = now.date() if now >= today_630 else (now - timedelta(days=1)).date()
+            if current_btc_session != btc_session_date:
+                current_btc_session = btc_session_date
+                btc_trades_today = 0
+
             # ==========================================
-            # 1. NIFTY 50 ENGINE (Mon-Fri 9:20 - 15:15)
+            # 1. NIFTY 50 ENGINE (Mon-Fri 9:20 - 15:15 IST — NO CHANGE)
             # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 20)
@@ -174,8 +183,10 @@ def run_bot():
                                             )
 
             # ==========================================
-            # 2. BTC-USD ENGINE (24/7 Live Scanning)
+            # 2. BTC-USD ENGINE (Active from 6:30 PM IST onwards)
             # ==========================================
+            is_btc_hours = (now.hour > 18) or (now.hour == 18 and now.minute >= 30) or (now.hour < 6)
+
             if btc_trade:
                 btc_ltp = feed.get_btc_ltp()
                 if btc_ltp > 0:
@@ -206,7 +217,7 @@ def run_bot():
                             f"Trade loss"
                         )
                         btc_trade = None
-            elif btc_trades_today < 4:
+            elif is_btc_hours and btc_trades_today < 4:
                 btc_df = feed.get_intraday_candles(security_id="BTC-USD", interval="5", days_back=4)
                 if len(btc_df) >= 25:
                     closed_btc = btc_df.iloc[:-1]
@@ -249,4 +260,3 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-                                            
