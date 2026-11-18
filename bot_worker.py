@@ -50,7 +50,7 @@ def run_bot():
     trades_today = 0
     current_day = None
 
-    send_telegram("🟢 Cloud Bot Active: 5-Min Institutional Levels & Strong S/R Engine")
+    send_telegram("[From cloud server]\nCloud Bot Active")
 
     while True:
         try:
@@ -71,21 +71,29 @@ def run_bot():
                 if ltp > 0:
                     if not active_trade["tp1_hit"] and ltp >= active_trade["tp1"]:
                         active_trade["tp1_hit"] = True
-                        active_trade["sl"] = active_trade["entry"]
                         send_telegram(
-                            f"✅ TP1 HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | 50% Booked | SL Trailed to ₹{active_trade['entry']:.2f}"
+                            f"[From cloud server]\n"
+                            f"TP-1 hit : {active_trade['tp1']:.2f}"
                         )
-                    elif ltp >= active_trade["tp2"]:
-                        pts = ltp - active_trade["entry"]
+                    elif not active_trade["tp2_hit"] and ltp >= active_trade["tp2"]:
+                        active_trade["tp2_hit"] = True
                         send_telegram(
-                            f"🎯 TP2 HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | Full Exit (+{pts:.1f} pts)"
+                            f"[From cloud server]\n"
+                            f"TP-2 hit : {active_trade['tp2']:.2f}"
+                        )
+                    elif ltp >= active_trade["tp3"]:
+                        send_telegram(
+                            f"[From cloud server]\n"
+                            f"TP-3 hit : {active_trade['tp3']:.2f}\n"
+                            f"Full target hit\n"
+                            f"Trade close profitably"
                         )
                         active_trade = None
                     elif ltp <= active_trade["sl"]:
-                        pts = ltp - active_trade["entry"]
-                        status = "Cost-to-Cost Exit" if active_trade["tp1_hit"] else f"Closed ({pts:.1f} pts)"
                         send_telegram(
-                            f"❌ SL HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | {status}"
+                            f"[From cloud server]\n"
+                            f"SL hit : {active_trade['sl']:.2f}\n"
+                            f"Trade loss"
                         )
                         active_trade = None
 
@@ -128,19 +136,34 @@ def run_bot():
                         risk = engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
                         if risk:
                             trades_today += 1
+                            entry_val = round(risk["entry"], 2)
+                            sl_val = round(risk["sl"], 2)
+                            sl_pts = int(round(entry_val - sl_val))
+                            tp1_val = round(entry_val + 10.0, 2)
+                            tp2_val = round(entry_val + 20.0, 2)
+                            tp3_val = round(entry_val + 30.0, 2)
+                            trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
+
                             active_trade = {
                                 "security_id": strike_info["security_id"],
-                                "symbol": strike_info["symbol"],
-                                "entry": risk["entry"],
-                                "sl": risk["sl"],
-                                "tp1": risk["tp1"],
-                                "tp2": risk["tp2"],
-                                "tp1_hit": False
+                                "symbol": trade_label,
+                                "entry": entry_val,
+                                "sl": sl_val,
+                                "tp1": tp1_val,
+                                "tp2": tp2_val,
+                                "tp3": tp3_val,
+                                "tp1_hit": False,
+                                "tp2_hit": False
                             }
+
                             alert_msg = (
-                                f"🚀 BUY {strike_info['symbol']} @ ₹{risk['entry']:.2f}\n"
-                                f"Strategy: {signal['strategy']}\n"
-                                f"SL: ₹{risk['sl']:.2f} (-{risk['sl_pts']:.0f} pts) | TP1: ₹{risk['tp1']:.2f} | TP2: ₹{risk['tp2']:.2f}"
+                                f"[From cloud server]\n"
+                                f"Trade : {trade_label}\n"
+                                f"Entry : {entry_val:.2f}\n"
+                                f"SL    : {sl_val:.2f} ({sl_pts} pts)\n"
+                                f"TP-1  : {tp1_val:.2f}\n"
+                                f"TP-2  : {tp2_val:.2f}\n"
+                                f"TP-3  : {tp3_val:.2f}"
                             )
                             send_telegram(alert_msg)
 
