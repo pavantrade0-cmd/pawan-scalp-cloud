@@ -12,6 +12,8 @@ IST = pytz.timezone("Asia/Kolkata")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+HEADER = "<b><code>[From cloud server]</code></b>\n\n"
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -36,7 +38,11 @@ def send_telegram(msg):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=8)
+        requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=8
+        )
     except Exception as e:
         print(f"Telegram error: {e}")
 
@@ -50,7 +56,7 @@ def run_bot():
     trades_today = 0
     current_day = None
 
-    send_telegram("[From cloud server]\nCloud Bot Active")
+    send_telegram(f"{HEADER}Cloud Bot Active")
 
     while True:
         try:
@@ -72,18 +78,18 @@ def run_bot():
                     if not active_trade["tp1_hit"] and ltp >= active_trade["tp1"]:
                         active_trade["tp1_hit"] = True
                         send_telegram(
-                            f"[From cloud server]\n"
+                            f"{HEADER}"
                             f"TP-1 hit : {active_trade['tp1']:.2f}"
                         )
                     elif not active_trade["tp2_hit"] and ltp >= active_trade["tp2"]:
                         active_trade["tp2_hit"] = True
                         send_telegram(
-                            f"[From cloud server]\n"
+                            f"{HEADER}"
                             f"TP-2 hit : {active_trade['tp2']:.2f}"
                         )
                     elif ltp >= active_trade["tp3"]:
                         send_telegram(
-                            f"[From cloud server]\n"
+                            f"{HEADER}"
                             f"TP-3 hit : {active_trade['tp3']:.2f}\n"
                             f"Full target hit\n"
                             f"Trade close profitably"
@@ -91,7 +97,7 @@ def run_bot():
                         active_trade = None
                     elif ltp <= active_trade["sl"]:
                         send_telegram(
-                            f"[From cloud server]\n"
+                            f"{HEADER}"
                             f"SL hit : {active_trade['sl']:.2f}\n"
                             f"Trade loss"
                         )
@@ -157,7 +163,7 @@ def run_bot():
                             }
 
                             alert_msg = (
-                                f"[From cloud server]\n"
+                                f"{HEADER}"
                                 f"Trade : {trade_label}\n"
                                 f"Entry : {entry_val:.2f}\n"
                                 f"SL    : {sl_val:.2f} ({sl_pts} pts)\n"
@@ -175,4 +181,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-                
+                    
