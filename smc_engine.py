@@ -1,119 +1,145 @@
-# engine/smc_engine.py
 import pandas as pd
+import numpy as np
 
-class SMCEngine:
-    def __init__(self, ema_fast: int = 20, ema_slow: int = 50):
-        self.ema_fast = ema_fast
-        self.ema_slow = ema_slow
-        self.last_traded_bar = None
+class InstitutionalLevelEngine:
+    def __init__(self, zone_buffer=12.0, min_sl=10.0, max_sl=20.0):
+        self.zone_buffer = zone_buffer
+        self.min_sl = min_sl
+        self.max_sl = max_sl
 
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculates 20 EMA and 50 EMA on any 5M DataFrame (Spot, CE, or PE)."""
-        if df is None or df.empty:
-            return df
-        df = df.copy()
-        df["ema_fast"] = df["close"].ewm(span=self.ema_fast, adjust=False).mean()
-        df["ema_slow"] = df["close"].ewm(span=self.ema_slow, adjust=False).mean()
-        return df
+    def detect_levels(self, df_5m, pdh, pdl):
+        levels = []
+        if pdh:
+            levels.append({"name": "PDH", "price": pdh, "type": "RESISTANCE", "priority": 1})
+        if pdl:
+            levels.append({"name": "PDL", "price": pdl, "type": "SUPPORT", "priority": 1})
 
-    def _check_option_bounce(self, opt_df: pd.DataFrame) -> dict | None:
-        """Checks 20/50 EMA bullish pullback bounce on the last closed 5M option candle."""
-        if opt_df is None or len(opt_df) < 55:
+        # 1. Swing High (SWH) & Swing Low (SWL) — 5-candle fractal on each side
+        highs = df_5m["high"].values
+        lows = df_5m["low"].values
+        n = len(df_5m)
+        swh_candidates = []
+        swl_candidates = []
+
+        for i in range(5, n - 5):
+            if highs[i] == max(highs[i - 5 : i + 6]):
+                swh_candidates.append(float(highs[i]))
+            if lows[i] == min(lows[i - 5 : i + 6]):
+                swl_candidates.append(float(lows[i]))
+
+        if swh_candidates:
+            levels.append({"name": "SWH", "price": swh_candidates[-1], "type": "RESISTANCE", "priority": 2})
+        if swl_candidates:
+            levels.append({"name": "SWL", "price": swl_candidates[-1], "type": "SUPPORT", "priority": 2})
+
+        # 2. Strong Support & Resistance (Multi-touch clusters >= 2 rejections within zone_buffer)
+        for p in swh_candidates:
+            touches = sum(1 for x in swh_candidates if abs(x - p) <= self.zone_buffer)
+            if touches >= 2 and not any(abs(l["price"] - p) <= self.zone_buffer for l in levels):
+                levels.append({"name": "Strong Resistance", "price": p, "type": "RESISTANCE", "priority": 3})
+
+        for p in swl_candidates:
+            touches = sum(1 for x in swl_candidates if abs(x - p) <= self.zone_buffer)
+            if touches >= 2 and not any(abs(l["price"] - p) <= self.zone_buffer for l in levels):
+                levels.append({"name": "Strong Support", "price": p, "type": "SUPPORT", "priority": 3})
+
+        return levels
+
+    def _body_ratio(self, row):
+        total_range = row["high"] - row["low"]
+        if total_range <= 0:
+            return 0.0
+        return abs(row["close"] - row["open"]) / total_range
+
+    def evaluate_spot_signal(self, df_5m, pdh, pdl):
+        if len(df_5m) < 25:
             return None
 
-        c_prev = opt_df.iloc[-2]   # Last closed 5M candle
-        c_before = opt_df.iloc[-3]
+        levels = self.detect_levels(df_5m.iloc[:-1], pdh, pdl)
+        curr = df_5m.iloc[-1]
+        prev = df_5m.iloc[-2]
+        buildup_window = df_5m.iloc[-5:-1]  # Prior 3-4 candles before breakout/breakdown
 
-        ema20 = float(c_prev["ema_fast"])
-        ema50 = float(c_prev["ema_slow"])
-        c_open = float(c_prev["open"])
-        c_high = float(c_prev["high"])
-        c_low = float(c_prev["low"])
-        c_close = float(c_prev["close"])
+        body_pct = self._body_ratio(curr)
+        is_green = curr["close"] > curr["open"]
+        is_red = curr["close"] < curr["open"]
 
-        # 1. Option trend must be bullish (20 EMA > 50 EMA)
-        if ema20 <= ema50:
-            return None
+        for lvl in levels:
+            price = lvl["price"]
+            name = lvl["name"]
+            ltype = lvl["type"]
 
-        # 2. Pullback touch to 20 EMA zone & Bullish close above 20 EMA
-        touched_20ema = (c_low <= ema20 * 1.005) or (float(c_before["low"]) <= float(c_before["ema_fast"]) * 1.005)
-        bullish_close = (c_close > c_open) and (c_close > ema20)
+            # --- 1. SUPPORT REVERSAL (Sweep or Rejection Bounce -> BUY CE) ---
+            if ltype == "SUPPORT":
+                swept = (curr["low"] <= price + 3.0) or (prev["low"] <= price + 3.0)
+                if swept and is_green and curr["close"] > price and body_pct >= 0.55:
+                    return {
+                        "direction": "CE",
+                        "strategy": f"Support Reversal ({name})",
+                        "level_price": price
+                    }
 
-        if not (touched_20ema and bullish_close):
-            return None
+            # --- 2. RESISTANCE REVERSAL (Sweep or Rejection Drop -> BUY PE) ---
+            if ltype == "RESISTANCE":
+                swept = (curr["high"] >= price - 3.0) or (prev["high"] >= price - 3.0)
+                if swept and is_red and curr["close"] < price and body_pct >= 0.55:
+                    return {
+                        "direction": "PE",
+                        "strategy": f"Resistance Reversal ({name})",
+                        "level_price": price
+                    }
 
-        # 3. Entry, SL, TP1 (1:1), TP2 (1:2) directly on Option Premium
-        entry = round(c_close, 2)
-        raw_sl = min(c_low, float(c_before["low"])) - 1.5
-        risk = entry - raw_sl
+            # --- 3. RESISTANCE BREAKOUT (3+ Candles Buildup + Strong Body Close Above -> BUY CE) ---
+            if ltype == "RESISTANCE":
+                held_below = all(buildup_window["close"] <= price + 2.0) and (buildup_window["high"].max() >= price - 15.0)
+                if held_below and is_green and prev["close"] <= price and curr["close"] > price and body_pct >= 0.62:
+                    return {
+                        "direction": "CE",
+                        "strategy": f"Resistance Breakout ({name})",
+                        "level_price": price
+                    }
 
-        # Enforce clean option buying risk boundaries (min 6 pts, max 25 pts)
-        if risk < 6.0:
-            risk = 6.0
-            raw_sl = entry - risk
-        elif risk > 25.0:
-            risk = 25.0
-            raw_sl = entry - risk
-
-        sl = round(raw_sl, 2)
-        tp1 = round(entry + risk, 2)
-        tp2 = round(entry + (risk * 2.0), 2)
-
-        return {
-            "bar_time": opt_df.index[-2],
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2
-        }
-
-    def scan_option_buying_setup(
-        self,
-        spot_df: pd.DataFrame,
-        ce_df: pd.DataFrame,
-        pe_df: pd.DataFrame,
-        ce_info: dict,
-        pe_info: dict
-    ) -> dict | None:
-        """Dual-Confirmation Scanner: Index Trend + Option Premium 20 EMA Bounce."""
-        if spot_df is None or len(spot_df) < 55:
-            return None
-
-        spot_prev = spot_df.iloc[-2]
-        spot_ema20 = float(spot_prev["ema_fast"])
-        spot_ema50 = float(spot_prev["ema_slow"])
-        spot_close = float(spot_prev["close"])
-
-        # CASE 1: NIFTY INDEX BULLISH -> CHECK CALL (CE) CHART ONLY
-        if spot_ema20 > spot_ema50 and spot_close > spot_ema20:
-            ce_signal = self._check_option_bounce(ce_df)
-            if ce_signal and ce_signal["bar_time"] != self.last_traded_bar:
-                self.last_traded_bar = ce_signal["bar_time"]
-                return {
-                    "chart_type": "CE",
-                    "asset": ce_info["symbol"],
-                    "spot_price": spot_close,
-                    "direction": "BUY_CE",
-                    "entry": ce_signal["entry"],
-                    "sl": ce_signal["sl"],
-                    "tp1": ce_signal["tp1"],
-                    "tp2": ce_signal["tp2"]
-                }
-
-        # CASE 2: NIFTY INDEX BEARISH -> CHECK PUT (PE) CHART ONLY
-        elif spot_ema20 < spot_ema50 and spot_close < spot_ema20:
-            pe_signal = self._check_option_bounce(pe_df)
-            if pe_signal and pe_signal["bar_time"] != self.last_traded_bar:
-                self.last_traded_bar = pe_signal["bar_time"]
-                return {
-                    "chart_type": "PE",
-                    "asset": pe_info["symbol"],
-                    "spot_price": spot_close,
-                    "direction": "BUY_PE",
-                    "entry": pe_signal["entry"],
-                    "sl": pe_signal["sl"],
-                    "tp1": pe_signal["tp1"],
-                    "tp2": pe_signal["tp2"]
-                }
+            # --- 4. SUPPORT BREAKDOWN (3+ Candles Buildup + Strong Body Close Below -> BUY PE) ---
+            if ltype == "SUPPORT":
+                held_above = all(buildup_window["close"] >= price - 2.0) and (buildup_window["low"].min() <= price + 15.0)
+                if held_above and is_red and prev["close"] >= price and curr["close"] < price and body_pct >= 0.62:
+                    return {
+                        "direction": "PE",
+                        "strategy": f"Support Breakdown ({name})",
+                        "level_price": price
+                    }
 
         return None
+
+    def validate_option_entry(self, opt_df_5m, current_ltp):
+        if len(opt_df_5m) < 12:
+            return None
+
+        curr = opt_df_5m.iloc[-1]
+        avg_vol = opt_df_5m["volume"].iloc[-11:-1].mean()
+
+        # Option volume confirmation (>1.5x average volume if volume data available)
+        if avg_vol > 0 and curr["volume"] < (1.5 * avg_vol):
+            return None
+
+        entry = round(current_ltp, 2)
+        raw_sl_points = entry - float(curr["low"])
+
+        # Reject trade if candle risk exceeds 20 pts max
+        if raw_sl_points > self.max_sl:
+            return None
+
+        # Enforce 10 to 20 pts SL window
+        sl_points = round(max(self.min_sl, min(self.max_sl, raw_sl_points)), 2)
+        sl_price = round(entry - sl_points, 2)
+        tp1_price = round(entry + (sl_points * 1.5), 2)
+        tp2_price = round(entry + (sl_points * 2.5), 2)
+
+        return {
+            "entry": entry,
+            "sl": sl_price,
+            "sl_pts": sl_points,
+            "tp1": tp1_price,
+            "tp2": tp2_price
+        }
+        
