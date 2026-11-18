@@ -1,150 +1,143 @@
+import os
 import requests
-import numpy as np
 import pandas as pd
-import yfinance as yf
+from datetime import datetime, timedelta
+import pytz
 
+IST = pytz.timezone("Asia/Kolkata")
+DHAN_BASE_URL = "https://api.dhan.co/v2"
 
-class DhanDataFeed:
-    def __init__(self, client_id: str = "", access_token: str = ""):
-        self.groww_url = "https://groww.in/v1/api/option_chain_service/v1/option_chain/nifty"
+class DhanFeed:
+    def __init__(self):
+        self.client_id = os.getenv("DHAN_CLIENT_ID", "")
+        self.access_token = os.getenv("DHAN_ACCESS_TOKEN", "")
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "access-token": self.access_token,
+            "client-id": self.client_id,
+            "Content-Type": "application/json",
             "Accept": "application/json"
         }
-        self.option_bars = {}
+        self._scrip_df = None
+        self._last_scrip_fetch = None
 
-    def get_nifty_spot_5m(self) -> pd.DataFrame:
-        try:
-            df = yf.download("^NSEI", period="5d", interval="5m", progress=False)
-            if df is None or df.empty:
-                return pd.DataFrame()
+    def _load_scrip_master(self):
+        now = datetime.now(IST)
+        if self._scrip_df is not None and self._last_scrip_fetch and (now - self._last_scrip_fetch).seconds < 21600:
+            return self._scrip_df
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        df = pd.read_csv(url, low_memory=False)
+        nifty_opts = df[
+            (df["SEM_EXM_EXCH_ID"] == "NSE") &
+            (df["SEM_INSTRUMENT_NAME"] == "OPTIDX") &
+            (df["SEM_TRADING_SYMBOL"].str.startswith("NIFTY-", na=False))
+        ].copy()
+        nifty_opts["SEM_EXPIRY_DATE"] = pd.to_datetime(nifty_opts["SEM_EXPIRY_DATE"])
+        today = pd.Timestamp(now.date())
+        nifty_opts = nifty_opts[nifty_opts["SEM_EXPIRY_DATE"] >= today]
+        nearest_expiry = nifty_opts["SEM_EXPIRY_DATE"].min()
+        self._scrip_df = nifty_opts[nifty_opts["SEM_EXPIRY_DATE"] == nearest_expiry].copy()
+        self._last_scrip_fetch = now
+        return self._scrip_df
 
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            df = df.rename(columns={
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume"
-            })
-            df = df[["open", "high", "low", "close", "volume"]].dropna()
-            if df.index.tz is None:
-                df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
-            else:
-                df.index = df.index.tz_convert("Asia/Kolkata")
-            return df
-        except Exception as e:
-            print(f"[Spot Feed Error]: {e}")
-            return pd.DataFrame()
-
-    def get_real_option_ltps(self, spot_price: float):
-        try:
-            res = requests.get(self.groww_url, headers=self.headers, timeout=8)
-            if res.status_code != 200:
-                return None
-
-            data = res.json()
-            chains = data.get("optionChain", {}).get("optionChains", [])
-            if not chains:
-                return None
-
-            atm_strike = int(round(spot_price / 50) * 50)
-            target_paise = atm_strike * 100
-
-            for row in chains:
-                ce_obj = row.get("callOption") or {}
-                pe_obj = row.get("putOption") or {}
-                strike_raw = int(ce_obj.get("strikePrice") or pe_obj.get("strikePrice") or 0)
-
-                if strike_raw == target_paise or strike_raw == atm_strike:
-                    ce_ltp = float(ce_obj.get("ltp", 0))
-                    pe_ltp = float(pe_obj.get("ltp", 0))
-                    ce_name = ce_obj.get("longDisplayName", f"NIFTY {atm_strike} CE").replace(" Call", " CE")
-                    pe_name = pe_obj.get("longDisplayName", f"NIFTY {atm_strike} PE").replace(" Put", " PE")
-
-                    if ce_ltp > 0 and pe_ltp > 0:
-                        return {
-                            "ce_symbol": ce_name,
-                            "ce_ltp": ce_ltp,
-                            "pe_symbol": pe_name,
-                            "pe_ltp": pe_ltp
-                        }
-        except Exception as e:
-            print(f"[Option Chain Error]: {e}")
-        return None
-
-    def _seed_option_history(self, spot_df: pd.DataFrame, live_ltp: float, is_call: bool) -> pd.DataFrame:
-        delta = 0.52 if is_call else -0.52
-        spot_closes = spot_df["close"].values
-        spot_diff = spot_closes - spot_closes[-1]
-
-        est_close = np.maximum(5.0, live_ltp + (spot_diff * delta))
-        bar_range = np.abs(spot_df["high"].values - spot_df["low"].values) * 0.52
-
-        est_open = np.roll(est_close, 1)
-        est_open[0] = est_close[0]
-        est_high = np.maximum(est_open, est_close) + (bar_range * 0.45)
-        est_low = np.maximum(2.0, np.minimum(est_open, est_close) - (bar_range * 0.45))
-
-        return pd.DataFrame({
-            "open": np.round(est_open, 2),
-            "high": np.round(est_high, 2),
-            "low": np.round(est_low, 2),
-            "close": np.round(est_close, 2),
-            "volume": spot_df["volume"].values
-        }, index=spot_df.index)
-
-    def _update_live_option_bar(self, symbol: str, spot_df: pd.DataFrame, live_ltp: float, is_call: bool) -> pd.DataFrame:
-        if symbol not in self.option_bars or self.option_bars[symbol].empty:
-            self.option_bars[symbol] = self._seed_option_history(spot_df, live_ltp, is_call)
-            return self.option_bars[symbol]
-
-        df = self.option_bars[symbol]
-        now_ist = pd.Timestamp.now(tz="Asia/Kolkata")
-        current_bar_time = now_ist.floor("5min")
-
-        if current_bar_time in df.index:
-            df.loc[current_bar_time, "high"] = max(float(df.loc[current_bar_time, "high"]), live_ltp)
-            df.loc[current_bar_time, "low"] = min(float(df.loc[current_bar_time, "low"]), live_ltp)
-            df.loc[current_bar_time, "close"] = live_ltp
-        else:
-            new_row = pd.DataFrame({
-                "open": [live_ltp],
-                "high": [live_ltp],
-                "low": [live_ltp],
-                "close": [live_ltp],
-                "volume": [1000]
-            }, index=[current_bar_time])
-            df = pd.concat([df, new_row]).iloc[-250:]
-            self.option_bars[symbol] = df
-
-        return df
-
-    def fetch_all_three_charts(self):
-        spot_df = self.get_nifty_spot_5m()
-        if spot_df.empty:
-            return None
-
-        current_spot = float(spot_df["close"].iloc[-1])
-        quotes = self.get_real_option_ltps(current_spot)
-        if not quotes:
-            return None
-
-        ce_sym = quotes["ce_symbol"]
-        pe_sym = quotes["pe_symbol"]
-        ce_ltp = quotes["ce_ltp"]
-        pe_ltp = quotes["pe_ltp"]
-
-        ce_df = self._update_live_option_bar(ce_sym, spot_df, ce_ltp, is_call=True)
-        pe_df = self._update_live_option_bar(pe_sym, spot_df, pe_ltp, is_call=False)
-
-        return {
-            "spot_price": current_spot,
-            "spot_df": spot_df,
-            "ce_info": {"symbol": ce_sym},
-            "ce_df": ce_df,
-            "pe_info": {"symbol": pe_sym},
-            "pe_df": pe_df
+    def get_intraday_candles(self, security_id="13", exchange_segment="IDX_I", instrument="INDEX", interval="5", days_back=5):
+        now = datetime.now(IST)
+        from_dt = (now - timedelta(days=days_back)).strftime("%Y-%m-%d 09:15:00")
+        to_dt = now.strftime("%Y-%m-%d %H:%M:%S")
+        payload = {
+            "securityId": str(security_id),
+            "exchangeSegment": exchange_segment,
+            "instrument": instrument,
+            "interval": str(interval),
+            "oi": False,
+            "fromDate": from_dt,
+            "toDate": to_dt
         }
+        resp = requests.post(f"{DHAN_BASE_URL}/charts/intraday", json=payload, headers=self.headers, timeout=10)
+        data = resp.json()
+        if "timestamp" not in data or not data["timestamp"]:
+            return pd.DataFrame()
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(data["timestamp"], unit="s", utc=True).tz_convert(IST),
+            "open": data["open"],
+            "high": data["high"],
+            "low": data["low"],
+            "close": data["close"],
+            "volume": data.get("volume", [0] * len(data["timestamp"]))
+        })
+        return df.sort_values("timestamp").reset_index(drop=True)
+
+    def get_daily_prev_hl(self):
+        now = datetime.now(IST)
+        from_dt = (now - timedelta(days=10)).strftime("%Y-%m-%d")
+        to_dt = now.strftime("%Y-%m-%d")
+        payload = {
+            "securityId": "13",
+            "exchangeSegment": "IDX_I",
+            "instrument": "INDEX",
+            "expiryCode": 0,
+            "oi": False,
+            "fromDate": from_dt,
+            "toDate": to_dt
+        }
+        resp = requests.post(f"{DHAN_BASE_URL}/charts/historical", json=payload, headers=self.headers, timeout=10)
+        data = resp.json()
+        if "timestamp" not in data or len(data["timestamp"]) < 2:
+            return None, None
+        df = pd.DataFrame({
+            "timestamp": pd.to_datetime(data["timestamp"], unit="s", utc=True).tz_convert(IST),
+            "high": data["high"],
+            "low": data["low"]
+        })
+        today_date = now.date()
+        prev_days = df[df["timestamp"].dt.date < today_date]
+        if prev_days.empty:
+            return None, None
+        last_day = prev_days.iloc[-1]
+        return float(last_day["high"]), float(last_day["low"])
+
+    def get_option_ltp_bulk(self, security_ids):
+        payload = {"NSE_FNO": [int(sid) for sid in security_ids]}
+        resp = requests.post(f"{DHAN_BASE_URL}/marketfeed/ltp", json=payload, headers=self.headers, timeout=10)
+        data = resp.json().get("data", {}).get("NSE_FNO", {})
+        return {str(k): float(v.get("last_price", 0.0)) for k, v in data.items()}
+
+    def select_strike_above_180(self, spot_price, option_type="CE"):
+        df = self._load_scrip_master()
+        opt_df = df[df["SEM_OPTION_TYPE"] == option_type].copy()
+        opt_df["SEM_STRIKE_PRICE"] = opt_df["SEM_STRIKE_PRICE"].astype(float)
+
+        if option_type == "CE":
+            candidates = opt_df[
+                (opt_df["SEM_STRIKE_PRICE"] <= spot_price + 150) &
+                (opt_df["SEM_STRIKE_PRICE"] >= spot_price - 500)
+            ].sort_values("SEM_STRIKE_PRICE", ascending=False)
+        else:
+            candidates = opt_df[
+                (opt_df["SEM_STRIKE_PRICE"] >= spot_price - 150) &
+                (opt_df["SEM_STRIKE_PRICE"] <= spot_price + 500)
+            ].sort_values("SEM_STRIKE_PRICE", ascending=True)
+
+        if candidates.empty:
+            return None
+
+        sec_ids = candidates["SEM_SMST_SECURITY_ID"].astype(str).tolist()
+        ltp_map = self.get_option_ltp_bulk(sec_ids)
+
+        valid_strikes = []
+        for _, row in candidates.iterrows():
+            sid = str(row["SEM_SMST_SECURITY_ID"])
+            ltp = ltp_map.get(sid, 0.0)
+            if ltp >= 180.0:
+                valid_strikes.append({
+                    "security_id": sid,
+                    "symbol": f"NIFTY {int(row['SEM_STRIKE_PRICE'])} {option_type}",
+                    "strike": float(row["SEM_STRIKE_PRICE"]),
+                    "option_type": option_type,
+                    "ltp": ltp
+                })
+
+        if not valid_strikes:
+            return None
+
+        valid_strikes.sort(key=lambda x: x["ltp"])
+        return valid_strikes[0]
