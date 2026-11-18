@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -40,7 +40,6 @@ class DhanFeed:
         if sid == "BTC-USD":
             return self._fetch_yahoo_candles("BTC-USD", interval=interval, days_back=days_back)
 
-        # Synthetic 5-min Option candles synced with live Nifty Spot
         spot_df = self._fetch_yahoo_candles("^NSEI", interval=interval, days_back=days_back)
         if spot_df.empty or sid not in self._active_sim:
             return pd.DataFrame()
@@ -59,6 +58,22 @@ class DhanFeed:
         return opt_df
 
     def get_daily_prev_hl(self, ticker="^NSEI"):
+        # For BTC-USD, compute Previous Session High/Low anchored at 6:30 PM IST
+        if ticker == "BTC-USD":
+            df = self._fetch_yahoo_candles("BTC-USD", interval="15", days_back=4)
+            if df.empty:
+                return None, None
+            now_ist = datetime.now(IST)
+            today_630 = now_ist.replace(hour=18, minute=30, second=0, microsecond=0)
+            curr_session_start = today_630 if now_ist >= today_630 else (today_630 - timedelta(days=1))
+            prev_session_start = curr_session_start - timedelta(days=1)
+
+            prev_sess = df[(df["timestamp"] >= prev_session_start) & (df["timestamp"] < curr_session_start)]
+            if prev_sess.empty:
+                return None, None
+            return float(prev_sess["high"].max()), float(prev_sess["low"].min())
+
+        # Standard Indian Market daily candle for ^NSEI
         encoded = requests.utils.quote(ticker)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1d&range=10d"
         resp = requests.get(url, headers=self.headers, timeout=10)
@@ -122,5 +137,5 @@ class DhanFeed:
             "strike": float(strike),
             "option_type": option_type,
             "ltp": est_ltp
-                }
+            }
         
