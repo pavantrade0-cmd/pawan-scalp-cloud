@@ -1,6 +1,8 @@
 import os
 import time
+import threading
 import requests
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import pytz
 from market_feed import DhanFeed
@@ -9,6 +11,19 @@ from smc_engine import InstitutionalLevelEngine
 IST = pytz.timezone("Asia/Kolkata")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -21,6 +36,7 @@ def send_telegram(msg):
         print(f"Telegram error: {e}")
 
 def run_bot():
+    threading.Thread(target=start_health_server, daemon=True).start()
     feed = DhanFeed()
     engine = InstitutionalLevelEngine(zone_buffer=12.0, min_sl=10.0, max_sl=20.0)
 
@@ -131,4 +147,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-    
+                            
