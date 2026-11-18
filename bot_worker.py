@@ -1,228 +1,134 @@
 import os
-import json
 import time
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timezone, timedelta
+import requests
+from datetime import datetime
+import pytz
+from market_feed import DhanFeed
+from smc_engine import InstitutionalLevelEngine
 
-from smc_engine import SMCEngine
-from market_feed import DhanDataFeed
-from telegram_bot import TelegramNotifier
+IST = pytz.timezone("Asia/Kolkata")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-BOT_TOKEN = "9227619823:AAEhVHQg7h2JqSu1zQgn2IRIwEMOapfqKSQ"
-CHAT_ID = "7107919128"
-POLL_INTERVAL = 5  # Seconds
-STATE_FILE = "active_trade.json"
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-# ==========================================
-# PERSISTENT TRADE STATE (SURVIVES RESTARTS)
-# ==========================================
-def load_active_trade():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return None
-    return None
-
-
-def save_active_trade(trade_data):
+def send_telegram(msg):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(msg)
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        if trade_data is None:
-            if os.path.exists(STATE_FILE):
-                os.remove(STATE_FILE)
-        else:
-            with open(STATE_FILE, "w") as f:
-                json.dump(trade_data, f)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=8)
     except Exception as e:
-        print(f"[State Save Error]: {e}")
-
-
-# ==========================================
-# RENDER WEB PORT BINDING
-# ==========================================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"PAWAN NIFTY OPTION SCALPER CLOUD ACTIVE")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def start_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    print(f"[Render Port] Bound to 0.0.0.0:{port}")
-    server.serve_forever()
-
-
-# ==========================================
-# CLEAN BOLD TELEGRAM ALERTS (CLOUD SERVER)
-# ==========================================
-def format_cloud_entry_alert(trade: dict) -> str:
-    opt_side = trade["chart_type"]
-    return (
-        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        f"<b>Contract:</b> {trade['asset']}\n"
-        f"<b>Action:</b> <b>{opt_side}</b>\n"
-        f"<b>Entry:</b> <b>{trade['entry']:.2f}</b>\n"
-        f"<b>Stop Loss:</b> <b>{trade['sl']:.2f}</b>\n"
-        f"<b>Target 1:</b> <b>{trade['tp1']:.2f}</b>\n"
-        f"<b>Target 2:</b> <b>{trade['tp2']:.2f}</b>"
-    )
-
-
-def format_cloud_tp1_alert(tr: dict, curr_price: float) -> str:
-    return (
-        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        f"<b>Contract:</b> {tr['asset']}\n"
-        f"<b>Status:</b> Target 1 Reached (<b>{tr['tp1']:.2f}</b>)\n"
-        f"<b>Current Price:</b> <b>{curr_price:.2f}</b>\n"
-        f"<b>Action:</b> Book 50% & SL Trailed to Entry (<b>{tr['entry']:.2f}</b>)"
-    )
-
-
-def format_cloud_tp2_alert(tr: dict) -> str:
-    return (
-        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        f"<b>Contract:</b> {tr['asset']}\n"
-        f"<b>Status:</b> Target 2 Reached (<b>{tr['tp2']:.2f}</b>)\n"
-        "<b>Action:</b> Full Profit Booked — Trade Closed"
-    )
-
-
-def format_cloud_sl_alert(tr: dict, exit_price: float) -> str:
-    label = "Trailing SL Hit at Cost" if tr.get("tp1_hit") else "Stop Loss Hit"
-    return (
-        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        f"<b>Contract:</b> {tr['asset']}\n"
-        f"<b>Status:</b> {label} (<b>{tr['sl']:.2f}</b>)\n"
-        f"<b>Exit Price:</b> <b>{exit_price:.2f}</b>\n"
-        "<b>Action:</b> Position Closed"
-    )
-
-
-def is_market_open() -> bool:
-    now = datetime.now(IST)
-    if now.weekday() >= 5:
-        return False
-    mins = now.hour * 60 + now.minute
-    return (9 * 60 + 20) <= mins <= (15 * 60 + 15)
-
-
-def get_tracked_option_df(feed: DhanDataFeed, active_trade: dict, bundle: dict):
-    """Fetches exact open option contract data even if ATM strike shifts."""
-    sec_id = active_trade.get("security_id")
-    if sec_id and hasattr(feed, "fetch_intraday_candles"):
-        try:
-            df = feed.fetch_intraday_candles(sec_id, exchange_segment="NSE_FNO", instrument="OPTIDX")
-            if df is not None and not df.empty:
-                return df
-        except Exception:
-            pass
-    return bundle["ce_df"] if active_trade["chart_type"] == "CE" else bundle["pe_df"]
-
+        print(f"Telegram error: {e}")
 
 def run_bot():
-    feed = DhanDataFeed()
-    engine = SMCEngine(ema_fast=20, ema_slow=50)
-    tg = TelegramNotifier(BOT_TOKEN, CHAT_ID)
-    active_trade = load_active_trade()
+    feed = DhanFeed()
+    engine = InstitutionalLevelEngine(zone_buffer=12.0, min_sl=10.0, max_sl=20.0)
 
-    print("[Cloud Server] NIFTY Option Buying Scanner Started...")
-    tg.send_message(
-        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-        "<b>Status:</b> Cloud Bot Connected (Option Buying + Auto SL/TP Active)"
-    )
+    active_trade = None
+    last_checked_candle = None
+    trades_today = 0
+    current_day = None
+
+    send_telegram("🟢 Cloud Bot Active: 5-Min Institutional Levels & Strong S/R Engine")
 
     while True:
         try:
-            if not is_market_open():
-                if active_trade is not None and datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 16:
-                    tg.send_message(
-                        "<b>[ FROM CLOUD SERVER ]</b>\n\n"
-                        f"<b>Contract:</b> {active_trade['asset']}\n"
-                        "<b>Status:</b> Intraday Auto Square-Off (3:15 PM)\n"
-                        "<b>Action:</b> Position Closed"
-                    )
-                    active_trade = None
-                    save_active_trade(None)
-                time.sleep(30)
+            now = datetime.now(IST)
+            if current_day != now.date():
+                current_day = now.date()
+                trades_today = 0
+                active_trade = None
+
+            if now.weekday() >= 5 or not ((now.hour == 9 and now.minute >= 20) or (10 <= now.hour <= 14) or (now.hour == 15 and now.minute <= 15)):
+                time.sleep(20)
                 continue
 
-            bundle = feed.fetch_all_three_charts()
-            if not bundle:
-                time.sleep(POLL_INTERVAL)
-                continue
+            if active_trade:
+                ltp_map = feed.get_option_ltp_bulk([active_trade["security_id"]])
+                ltp = ltp_map.get(active_trade["security_id"], 0.0)
 
-            spot_df = engine.calculate_indicators(bundle["spot_df"])
-            ce_df = engine.calculate_indicators(bundle["ce_df"])
-            pe_df = engine.calculate_indicators(bundle["pe_df"])
-
-            # 1. Monitor Active Open Position (Exact Strike + Auto Trailing SL)
-            if active_trade is not None:
-                target_df = get_tracked_option_df(feed, active_trade, bundle)
-                if target_df is not None and not target_df.empty:
-                    latest = target_df.iloc[-1]
-                    curr_price = float(latest["close"])
-                    curr_high = float(latest["high"])
-                    curr_low = float(latest["low"])
-
-                    # Target 1 Check + Trail SL to Entry
-                    if not active_trade["tp1_hit"] and (curr_high >= active_trade["tp1"] or curr_price >= active_trade["tp1"]):
+                if ltp > 0:
+                    if not active_trade["tp1_hit"] and ltp >= active_trade["tp1"]:
                         active_trade["tp1_hit"] = True
                         active_trade["sl"] = active_trade["entry"]
-                        save_active_trade(active_trade)
-                        tg.send_message(format_cloud_tp1_alert(active_trade, curr_price))
-
-                    # Target 2 Check
-                    if curr_high >= active_trade["tp2"] or curr_price >= active_trade["tp2"]:
-                        tg.send_message(format_cloud_tp2_alert(active_trade))
+                        send_telegram(
+                            f"✅ TP1 HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | 50% Booked | SL Trailed to ₹{active_trade['entry']:.2f}"
+                        )
+                    elif ltp >= active_trade["tp2"]:
+                        pts = ltp - active_trade["entry"]
+                        send_telegram(
+                            f"🎯 TP2 HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | Full Exit (+{pts:.1f} pts)"
+                        )
                         active_trade = None
-                        save_active_trade(None)
-
-                    # Stop Loss Check (Checks both live LTP & candle low)
-                    elif curr_price <= active_trade["sl"] or curr_low <= active_trade["sl"]:
-                        tg.send_message(format_cloud_sl_alert(active_trade, curr_price))
+                    elif ltp <= active_trade["sl"]:
+                        pts = ltp - active_trade["entry"]
+                        status = "Cost-to-Cost Exit" if active_trade["tp1_hit"] else f"Closed ({pts:.1f} pts)"
+                        send_telegram(
+                            f"❌ SL HIT: {active_trade['symbol']} @ ₹{ltp:.2f} | {status}"
+                        )
                         active_trade = None
-                        save_active_trade(None)
 
-            # 2. Scan for New Option Buying Setup
-            else:
-                trade = engine.scan_option_buying_setup(
-                    spot_df=spot_df,
-                    ce_df=ce_df,
-                    pe_df=pe_df,
-                    ce_info=bundle["ce_info"],
-                    pe_info=bundle["pe_info"]
-                )
-                if trade:
-                    opt_info = bundle["ce_info"] if trade["chart_type"] == "CE" else bundle["pe_info"]
-                    active_trade = {
-                        "chart_type": trade["chart_type"],
-                        "asset": trade["asset"],
-                        "security_id": opt_info.get("security_id") or opt_info.get("SECURITY_ID"),
-                        "entry": float(trade["entry"]),
-                        "sl": float(trade["sl"]),
-                        "tp1": float(trade["tp1"]),
-                        "tp2": float(trade["tp2"]),
-                        "tp1_hit": False
-                    }
-                    save_active_trade(active_trade)
-                    tg.send_message(format_cloud_entry_alert(trade))
+                time.sleep(5)
+                continue
+
+            if trades_today >= 3 or (now.hour == 15 and now.minute >= 0):
+                time.sleep(20)
+                continue
+
+            spot_df = feed.get_intraday_candles(security_id="13", exchange_segment="IDX_I", instrument="INDEX", interval="5", days_back=4)
+            if len(spot_df) < 25:
+                time.sleep(10)
+                continue
+
+            closed_df = spot_df.iloc[:-1]
+            latest_candle_ts = closed_df.iloc[-1]["timestamp"]
+
+            if last_checked_candle == latest_candle_ts:
+                time.sleep(5)
+                continue
+
+            last_checked_candle = latest_candle_ts
+            pdh, pdl = feed.get_daily_prev_hl()
+            signal = engine.evaluate_spot_signal(closed_df, pdh, pdl)
+
+            if signal:
+                spot_close = float(closed_df.iloc[-1]["close"])
+                strike_info = feed.select_strike_above_180(spot_close, option_type=signal["direction"])
+
+                if strike_info:
+                    opt_df = feed.get_intraday_candles(
+                        security_id=strike_info["security_id"],
+                        exchange_segment="NSE_FNO",
+                        instrument="OPTIDX",
+                        interval="5",
+                        days_back=2
+                    )
+                    if len(opt_df) >= 12:
+                        risk = engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
+                        if risk:
+                            trades_today += 1
+                            active_trade = {
+                                "security_id": strike_info["security_id"],
+                                "symbol": strike_info["symbol"],
+                                "entry": risk["entry"],
+                                "sl": risk["sl"],
+                                "tp1": risk["tp1"],
+                                "tp2": risk["tp2"],
+                                "tp1_hit": False
+                            }
+                            alert_msg = (
+                                f"🚀 BUY {strike_info['symbol']} @ ₹{risk['entry']:.2f}\n"
+                                f"Strategy: {signal['strategy']}\n"
+                                f"SL: ₹{risk['sl']:.2f} (-{risk['sl_pts']:.0f} pts) | TP1: ₹{risk['tp1']:.2f} | TP2: ₹{risk['tp2']:.2f}"
+                            )
+                            send_telegram(alert_msg)
+
+            time.sleep(5)
 
         except Exception as e:
-            print(f"[Cloud Worker Error]: {e}")
-
-        time.sleep(POLL_INTERVAL)
-
+            print(f"Loop error: {e}")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    threading.Thread(target=start_health_server, daemon=True).start()
     run_bot()
+    
