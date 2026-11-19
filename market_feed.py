@@ -1,3 +1,4 @@
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -12,6 +13,8 @@ class DhanFeed:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
             "Referer": "https://www.nseindia.com/option-chain"
         }
         self._session = requests.Session()
@@ -19,8 +22,12 @@ class DhanFeed:
 
     def _fetch_yahoo_candles(self, ticker, interval="5", days_back=5):
         encoded = requests.utils.quote(ticker)
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval={interval}m&range={days_back}d"
-        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=10)
+        cb = int(time.time() * 1000)
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}"
+            f"?interval={interval}m&range={days_back}d&includePrePost=false&_t={cb}"
+        )
+        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"], "Cache-Control": "no-cache"}, timeout=8)
         res = resp.json().get("chart", {}).get("result", [])
         if not res:
             return pd.DataFrame()
@@ -36,13 +43,36 @@ class DhanFeed:
         }).dropna(subset=["open", "high", "low", "close"])
         return df.sort_values("timestamp").reset_index(drop=True)
 
+    def _get_live_nifty_spot_range(self):
+        # Fetch 1m candles + regularMarketPrice metadata for zero-lag live spot
+        encoded = requests.utils.quote("^NSEI")
+        cb = int(time.time() * 1000)
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1m&range=1d&_t={cb}"
+        try:
+            resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"], "Cache-Control": "no-cache"}, timeout=6)
+            res = resp.json().get("chart", {}).get("result", [])
+            if not res:
+                return None, None, None
+            meta_price = float(res[0].get("meta", {}).get("regularMarketPrice", 0.0))
+            q = res[0]["indicators"]["quote"][0]
+            valid_closes = [c for c in q["close"] if c is not None]
+            valid_highs = [h for h in q["high"] if h is not None]
+            valid_lows = [l for l in q["low"] if l is not None]
+
+            curr_c = meta_price if meta_price > 0 else (float(valid_closes[-1]) if valid_closes else None)
+            last_h = max(curr_c, float(valid_highs[-1])) if (curr_c and valid_highs) else curr_c
+            last_l = min(curr_c, float(valid_lows[-1])) if (curr_c and valid_lows) else curr_c
+            return curr_c, last_h, last_l
+        except Exception:
+            return None, None, None
+
     def _fetch_nse_option_chain(self):
         try:
-            self._session.get("https://www.nseindia.com", headers=self.headers, timeout=5)
+            self._session.get("https://www.nseindia.com", headers=self.headers, timeout=4)
             resp = self._session.get(
                 "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",
                 headers=self.headers,
-                timeout=8
+                timeout=6
             )
             if resp.status_code == 200:
                 return resp.json().get("records", {}).get("data", [])
@@ -91,7 +121,7 @@ class DhanFeed:
 
         encoded = requests.utils.quote(ticker)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1d&range=10d"
-        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=10)
+        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=8)
         res = resp.json().get("chart", {}).get("result", [])
         if not res:
             return None, None
@@ -115,34 +145,40 @@ class DhanFeed:
             return 0.0
         return round(float(df.iloc[-1]["close"]), 2)
 
-    def get_option_ltp_bulk(self, security_ids):
+    def get_option_live_ticks(self, security_id):
+        """Returns (ltp, candle_high, candle_low) for instant intra-candle TP/SL detection."""
+        sid_str = str(security_id)
+        strike_str, opt_type = sid_str.split("_")
+        strike_val = float(strike_str)
+
         oc_data = self._fetch_nse_option_chain()
-        out = {}
-        for sid in security_ids:
-            sid_str = str(sid)
-            strike_str, opt_type = sid_str.split("_")
-            strike_val = float(strike_str)
-            live_found = False
+        for row in oc_data:
+            if float(row.get("strikePrice", 0)) == strike_val and opt_type in row:
+                ltp = float(row[opt_type].get("lastPrice", 0))
+                if ltp > 0:
+                    val = round(ltp, 2)
+                    return val, val, val
 
-            for row in oc_data:
-                if float(row.get("strikePrice", 0)) == strike_val and opt_type in row:
-                    ltp = float(row[opt_type].get("lastPrice", 0))
-                    if ltp > 0:
-                        out[sid_str] = round(ltp, 2)
-                        live_found = True
-                        break
+        if sid_str in self._active_sim:
+            curr_spot, spot_h, spot_l = self._get_live_nifty_spot_range()
+            if curr_spot:
+                meta = self._active_sim[sid_str]
+                if meta["option_type"] == "CE":
+                    ltp = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * 0.54, 2))
+                    opt_h = max(ltp, round(meta["ref_ltp"] + (spot_h - meta["ref_spot"]) * 0.54, 2))
+                    opt_l = max(1.0, round(meta["ref_ltp"] + (spot_l - meta["ref_spot"]) * 0.54, 2))
+                else:
+                    ltp = max(1.0, round(meta["ref_ltp"] + (meta["ref_spot"] - curr_spot) * 0.54, 2))
+                    opt_h = max(ltp, round(meta["ref_ltp"] + (meta["ref_spot"] - spot_l) * 0.54, 2))
+                    opt_l = max(1.0, round(meta["ref_ltp"] + (meta["ref_spot"] - spot_h) * 0.54, 2))
+                return ltp, opt_h, opt_l
 
-            if not live_found and sid_str in self._active_sim:
-                spot_df = self._fetch_yahoo_candles("^NSEI", interval="5", days_back=1)
-                if not spot_df.empty:
-                    curr_spot = float(spot_df.iloc[-1]["close"])
-                    meta = self._active_sim[sid_str]
-                    delta = 0.54 if meta["option_type"] == "CE" else -0.54
-                    out[sid_str] = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * delta, 2))
-        return out
+        return 0.0, 0.0, 0.0
 
     def select_strike_above_180(self, spot_price, option_type="CE"):
-        atm = round(spot_price / 50.0) * 50
+        live_spot, _, _ = self._get_live_nifty_spot_range()
+        ref_spot = live_spot if live_spot else spot_price
+        atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
         candidates = []
@@ -159,7 +195,7 @@ class DhanFeed:
             strike = int(strike)
             sec_id = f"{strike}_{option_type}"
             self._active_sim[sec_id] = {
-                "ref_spot": spot_price,
+                "ref_spot": ref_spot,
                 "ref_ltp": real_ltp,
                 "option_type": option_type
             }
@@ -171,18 +207,17 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # Calibrated ITM pricing (matches ~190-215 live premium range)
         if option_type == "CE":
             strike = int(atm - 100)
-            intrinsic = max(0.0, spot_price - strike)
+            intrinsic = max(0.0, ref_spot - strike)
         else:
             strike = int(atm + 100)
-            intrinsic = max(0.0, strike - spot_price)
+            intrinsic = max(0.0, strike - ref_spot)
 
         est_ltp = round(max(185.0, intrinsic + 68.0), 2)
         sec_id = f"{strike}_{option_type}"
         self._active_sim[sec_id] = {
-            "ref_spot": spot_price,
+            "ref_spot": ref_spot,
             "ref_ltp": est_ltp,
             "option_type": option_type
         }
@@ -193,4 +228,4 @@ class DhanFeed:
             "option_type": option_type,
             "ltp": est_ltp
             }
-                
+        
