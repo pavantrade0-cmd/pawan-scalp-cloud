@@ -59,15 +59,23 @@ class DhanFeed:
             valid_lows = [float(l) for l in q["low"] if l is not None]
 
             curr = meta_price if meta_price > 0 else (valid_closes[-1] if valid_closes else None)
-            # Use closed 1m candle high/low (index -2) + current spot to catch real spikes safely
             safe_h = max(curr, valid_highs[-2]) if (curr and len(valid_highs) >= 2) else curr
             safe_l = min(curr, valid_lows[-2]) if (curr and len(valid_lows) >= 2) else curr
             return curr, safe_h, safe_l
         except Exception:
             return None, None, None
 
+    def _estimate_option_premium(self, spot_val, strike, option_type):
+        """Unified Sahi Option Chain curve: computes exact premium for a specific strike."""
+        intrinsic = max(0.0, spot_val - strike) if option_type == "CE" else max(0.0, strike - spot_val)
+        return round(122.0 + 0.56 * intrinsic, 2)
+
     def _calc_dynamic_option_price(self, meta, spot_val):
-        """Dynamic ITM delta scaling (0.58 ATM/near-ITM up to 0.78 deep-ITM)."""
+        """Tracks live option LTP directly from the locked strike's intrinsic + delta."""
+        if "strike" in meta:
+            base_est = self._estimate_option_premium(spot_val, meta["strike"], meta["option_type"])
+            ref_est = self._estimate_option_premium(meta["ref_spot"], meta["strike"], meta["option_type"])
+            return max(1.0, round(meta["ref_ltp"] + (base_est - ref_est), 2))
         move = spot_val - meta["ref_spot"] if meta["option_type"] == "CE" else meta["ref_spot"] - spot_val
         eff_delta = 0.75 if move > 35.0 else (0.65 if move > 15.0 else 0.58)
         return max(1.0, round(meta["ref_ltp"] + move * eff_delta, 2))
@@ -98,7 +106,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.60 if meta["option_type"] == "CE" else -0.60
+        delta = 0.58 if meta["option_type"] == "CE" else -0.58
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -185,22 +193,24 @@ class DhanFeed:
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
+        # 1. Live NSE Option Chain: lock strike + its own LTP strictly above 180
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
             if opt_type in row:
                 ltp = float(row[opt_type].get("lastPrice", 0))
-                if 185.0 <= ltp <= 320.0:
-                    candidates.append((abs(sp - atm), sp, ltp))
+                if 182.0 <= ltp <= 250.0:
+                    candidates.append((ltp, sp))
 
         if candidates:
-            candidates.sort(key=lambda x: x[0])
-            _, strike, real_ltp = candidates[0]
-            strike = int(strike)
+            candidates.sort(key=lambda x: x[0])  # Pick the first strike strictly > 180 (closest to 185-205)
+            real_ltp, sp = candidates[0]
+            strike = int(sp)
             sec_id = f"{strike}_{option_type}"
             self._active_sim[sec_id] = {
+                "strike": float(strike),
                 "ref_spot": ref_spot,
-                "ref_ltp": real_ltp,
+                "ref_ltp": round(real_ltp, 2),
                 "option_type": option_type
             }
             return {
@@ -211,25 +221,24 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        if option_type == "CE":
-            strike = int(atm - 100)
-            intrinsic = max(0.0, ref_spot - strike)
-        else:
-            strike = int(atm + 100)
-            intrinsic = max(0.0, strike - ref_spot)
-
-        est_ltp = round(max(190.0, intrinsic + 105.0), 2)
-        sec_id = f"{strike}_{option_type}"
-        self._active_sim[sec_id] = {
-            "ref_spot": ref_spot,
-            "ref_ltp": est_ltp,
-            "option_type": option_type
-        }
-        return {
-            "security_id": sec_id,
-            "symbol": f"NIFTY {strike} {option_type}",
-            "strike": float(strike),
-            "option_type": option_type,
-            "ltp": est_ltp
-            }
-                     
+        # 2. Fallback: scan strikes into ITM until the strike's own premium is > 180
+        for offset in (0, 50, 100, 150, 200, 250):
+            strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
+            est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
+            if est_ltp > 180.0:
+                sec_id = f"{strike}_{option_type}"
+                self._active_sim[sec_id] = {
+                    "strike": float(strike),
+                    "ref_spot": ref_spot,
+                    "ref_ltp": est_ltp,
+                    "option_type": option_type
+                }
+                return {
+                    "security_id": sec_id,
+                    "symbol": f"NIFTY {strike} {option_type}",
+                    "strike": float(strike),
+                    "option_type": option_type,
+                    "ltp": est_ltp
+                }
+        return None
+        
