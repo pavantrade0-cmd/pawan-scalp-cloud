@@ -171,7 +171,7 @@ def run_bot():
                             )
                             nifty_trade = None
                             state_changed = True
-                        elif opt_low <= nifty_trade["sl"] and not nifty_trade["tp1_hit"]:
+                        elif opt_low <= (nifty_trade["sl"] + 0.75) and not nifty_trade["tp1_hit"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"SL hit : {nifty_trade['sl']:.2f}\n"
@@ -179,7 +179,7 @@ def run_bot():
                             )
                             nifty_trade = None
                             state_changed = True
-                        elif ltp <= nifty_trade["sl"]:
+                        elif ltp <= (nifty_trade["sl"] + 0.75):
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"SL hit : {nifty_trade['sl']:.2f}\n"
@@ -207,7 +207,6 @@ def run_bot():
                                         risk = nifty_engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
                                         if risk:
                                             nifty_trades_today += 1
-                                            # Lock Entry strictly to the selected strike's own premium
                                             entry_val = round(float(strike_info["ltp"]), 2)
                                             sl_pts = int(round(risk["sl_pts"]))
                                             sl_pts = min(max(sl_pts, 10), 15)
@@ -336,4 +335,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-        
+                
