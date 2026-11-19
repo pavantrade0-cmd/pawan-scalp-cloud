@@ -51,15 +51,26 @@ class DhanFeed:
             resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"], "Cache-Control": "no-cache"}, timeout=6)
             res = resp.json().get("chart", {}).get("result", [])
             if not res:
-                return None
+                return None, None, None
             meta_price = float(res[0].get("meta", {}).get("regularMarketPrice", 0.0))
-            if meta_price > 0:
-                return meta_price
             q = res[0]["indicators"]["quote"][0]
-            valid_closes = [c for c in q["close"] if c is not None]
-            return float(valid_closes[-1]) if valid_closes else None
+            valid_closes = [float(c) for c in q["close"] if c is not None]
+            valid_highs = [float(h) for h in q["high"] if h is not None]
+            valid_lows = [float(l) for l in q["low"] if l is not None]
+
+            curr = meta_price if meta_price > 0 else (valid_closes[-1] if valid_closes else None)
+            # Use closed 1m candle high/low (index -2) + current spot to catch real spikes safely
+            safe_h = max(curr, valid_highs[-2]) if (curr and len(valid_highs) >= 2) else curr
+            safe_l = min(curr, valid_lows[-2]) if (curr and len(valid_lows) >= 2) else curr
+            return curr, safe_h, safe_l
         except Exception:
-            return None
+            return None, None, None
+
+    def _calc_dynamic_option_price(self, meta, spot_val):
+        """Dynamic ITM delta scaling (0.58 ATM/near-ITM up to 0.78 deep-ITM)."""
+        move = spot_val - meta["ref_spot"] if meta["option_type"] == "CE" else meta["ref_spot"] - spot_val
+        eff_delta = 0.75 if move > 35.0 else (0.65 if move > 15.0 else 0.58)
+        return max(1.0, round(meta["ref_ltp"] + move * eff_delta, 2))
 
     def _fetch_nse_option_chain(self):
         try:
@@ -87,7 +98,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.55 if meta["option_type"] == "CE" else -0.55
+        delta = 0.60 if meta["option_type"] == "CE" else -0.60
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -141,7 +152,6 @@ class DhanFeed:
         return round(float(df.iloc[-1]["close"]), 2)
 
     def get_option_live_ticks(self, security_id):
-        """Uses clean regularMarketPrice tick to prevent false 1m wick SL triggers."""
         sid_str = str(security_id)
         strike_str, opt_type = sid_str.split("_")
         strike_val = float(strike_str)
@@ -155,19 +165,22 @@ class DhanFeed:
                     return val, val, val
 
         if sid_str in self._active_sim:
-            curr_spot = self._get_live_nifty_spot()
+            curr_spot, spot_h, spot_l = self._get_live_nifty_spot()
             if curr_spot:
                 meta = self._active_sim[sid_str]
+                ltp = self._calc_dynamic_option_price(meta, curr_spot)
                 if meta["option_type"] == "CE":
-                    ltp = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * 0.55, 2))
+                    opt_h = max(ltp, self._calc_dynamic_option_price(meta, spot_h))
+                    opt_l = min(ltp, self._calc_dynamic_option_price(meta, spot_l))
                 else:
-                    ltp = max(1.0, round(meta["ref_ltp"] + (meta["ref_spot"] - curr_spot) * 0.55, 2))
-                return ltp, ltp, ltp
+                    opt_h = max(ltp, self._calc_dynamic_option_price(meta, spot_l))
+                    opt_l = min(ltp, self._calc_dynamic_option_price(meta, spot_h))
+                return ltp, opt_h, opt_l
 
         return 0.0, 0.0, 0.0
 
     def select_strike_above_180(self, spot_price, option_type="CE"):
-        live_spot = self._get_live_nifty_spot()
+        live_spot, _, _ = self._get_live_nifty_spot()
         ref_spot = live_spot if live_spot else spot_price
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
@@ -198,7 +211,6 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # Calibrated ITM pricing (matches Sahi/TradingView ~205-225 premium range)
         if option_type == "CE":
             strike = int(atm - 100)
             intrinsic = max(0.0, ref_spot - strike)
@@ -220,4 +232,4 @@ class DhanFeed:
             "option_type": option_type,
             "ltp": est_ltp
             }
-            
+                     
