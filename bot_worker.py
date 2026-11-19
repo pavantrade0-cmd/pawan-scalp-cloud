@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import threading
 import requests
@@ -11,6 +12,7 @@ from smc_engine import InstitutionalLevelEngine
 IST = pytz.timezone("Asia/Kolkata")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+STATE_FILE = "bot_state.json"
 
 HEADER = "<b><code>[From cloud server]</code></b>\n\n"
 
@@ -46,6 +48,22 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}")
 
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"State save error: {e}")
+
 def calculate_btc_levels(closed_df, side):
     entry = float(closed_df.iloc[-1]["close"])
     recent = closed_df.iloc[-6:]
@@ -73,31 +91,56 @@ def run_bot():
     nifty_engine = InstitutionalLevelEngine(zone_buffer=12.0, min_sl=10.0, max_sl=15.0)
     btc_engine = InstitutionalLevelEngine(zone_buffer=80.0, min_sl=150.0, max_sl=400.0)
 
-    nifty_trade = None
-    btc_trade = None
-    last_nifty_candle = None
-    last_btc_candle = None
-    nifty_trades_today = 0
-    btc_trades_today = 0
-    current_nifty_day = None
-    current_btc_session = None
+    now_boot = datetime.now(IST)
+    state = load_state()
 
-    send_telegram(f"{HEADER}Cloud Bot Active\nMarkets : NIFTY 50 + BTC (6:30 PM IST)")
+    nifty_trade = state.get("nifty_trade")
+    btc_trade = state.get("btc_trade")
+    last_nifty_candle = state.get("last_nifty_candle")
+    last_btc_candle = state.get("last_btc_candle")
+    nifty_trades_today = state.get("nifty_trades_today", 0)
+    btc_trades_today = state.get("btc_trades_today", 0)
+    current_nifty_day = state.get("current_nifty_day")
+    current_btc_session = state.get("current_btc_session")
+    last_boot_day = state.get("last_boot_day")
+
+    # Restore simulator anchor if Nifty trade is active across container restart
+    if nifty_trade and "sim_meta" in nifty_trade:
+        feed._active_sim[nifty_trade["security_id"]] = nifty_trade["sim_meta"]
+
+    if last_boot_day != str(now_boot.date()):
+        last_boot_day = str(now_boot.date())
+        send_telegram(f"{HEADER}Cloud Bot Active\nMarkets : NIFTY 50 + BTC (6:30 PM IST)")
+        save_state({
+            "nifty_trade": nifty_trade,
+            "btc_trade": btc_trade,
+            "last_nifty_candle": last_nifty_candle,
+            "last_btc_candle": last_btc_candle,
+            "nifty_trades_today": nifty_trades_today,
+            "btc_trades_today": btc_trades_today,
+            "current_nifty_day": current_nifty_day,
+            "current_btc_session": current_btc_session,
+            "last_boot_day": last_boot_day
+        })
 
     while True:
         try:
             now = datetime.now(IST)
+            state_changed = False
 
-            if current_nifty_day != now.date():
-                current_nifty_day = now.date()
+            today_str = str(now.date())
+            if current_nifty_day != today_str:
+                current_nifty_day = today_str
                 nifty_trades_today = 0
                 nifty_trade = None
+                state_changed = True
 
             today_630 = now.replace(hour=18, minute=30, second=0, microsecond=0)
-            btc_session_date = now.date() if now >= today_630 else (now - timedelta(days=1)).date()
-            if current_btc_session != btc_session_date:
-                current_btc_session = btc_session_date
+            btc_session_str = str(now.date() if now >= today_630 else (now - timedelta(days=1)).date())
+            if current_btc_session != btc_session_str:
+                current_btc_session = btc_session_str
                 btc_trades_today = 0
+                state_changed = True
 
             # ==========================================
             # 1. NIFTY 50 ENGINE (Mon-Fri 9:25 - 15:15 IST)
@@ -114,9 +157,11 @@ def run_bot():
                     if ltp > 0:
                         if not nifty_trade["tp1_hit"] and opt_high >= nifty_trade["tp1"]:
                             nifty_trade["tp1_hit"] = True
+                            state_changed = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-1 hit : {nifty_trade['tp1']:.2f}")
                         if not nifty_trade["tp2_hit"] and opt_high >= nifty_trade["tp2"]:
                             nifty_trade["tp2_hit"] = True
+                            state_changed = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-2 hit : {nifty_trade['tp2']:.2f}")
                         if opt_high >= nifty_trade["tp3"]:
                             send_telegram(
@@ -126,6 +171,7 @@ def run_bot():
                                 f"Trade close profitably"
                             )
                             nifty_trade = None
+                            state_changed = True
                         elif opt_low <= nifty_trade["sl"] and not nifty_trade["tp1_hit"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
@@ -133,6 +179,7 @@ def run_bot():
                                 f"Trade loss"
                             )
                             nifty_trade = None
+                            state_changed = True
                         elif ltp <= nifty_trade["sl"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
@@ -140,13 +187,16 @@ def run_bot():
                                 f"Trade loss"
                             )
                             nifty_trade = None
+                            state_changed = True
                 elif nifty_trades_today < 3 and not (now.hour == 15 and now.minute >= 0):
                     spot_df = feed.get_intraday_candles(security_id="13", interval="5", days_back=4)
                     if len(spot_df) >= 25:
                         closed_df = spot_df.iloc[:-1]
                         ts = closed_df.iloc[-1]["timestamp"]
-                        if ts.date() == now.date() and last_nifty_candle != ts:
-                            last_nifty_candle = ts
+                        ts_str = str(ts)
+                        if ts.date() == now.date() and last_nifty_candle != ts_str:
+                            last_nifty_candle = ts_str
+                            state_changed = True
                             pdh, pdl = feed.get_daily_prev_hl("^NSEI")
                             signal = nifty_engine.evaluate_spot_signal(closed_df, pdh, pdl)
                             if signal:
@@ -174,8 +224,10 @@ def run_bot():
                                                 "tp2": tp2_val,
                                                 "tp3": tp3_val,
                                                 "tp1_hit": False,
-                                                "tp2_hit": False
+                                                "tp2_hit": False,
+                                                "sim_meta": feed._active_sim.get(strike_info["security_id"])
                                             }
+                                            state_changed = True
                                             send_telegram(
                                                 f"{HEADER}"
                                                 f"Trade : {trade_label}\n"
@@ -202,9 +254,11 @@ def run_bot():
 
                     if not btc_trade["tp1_hit"] and hit_tp1:
                         btc_trade["tp1_hit"] = True
+                        state_changed = True
                         send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-1 hit : {btc_trade['tp1']:.2f}")
                     elif not btc_trade["tp2_hit"] and hit_tp2:
                         btc_trade["tp2_hit"] = True
+                        state_changed = True
                         send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-2 hit : {btc_trade['tp2']:.2f}")
                     elif hit_tp3:
                         send_telegram(
@@ -214,6 +268,7 @@ def run_bot():
                             f"Trade close profitably"
                         )
                         btc_trade = None
+                        state_changed = True
                     elif hit_sl:
                         send_telegram(
                             f"{HEADER}Trade : {btc_trade['symbol']}\n"
@@ -221,13 +276,15 @@ def run_bot():
                             f"Trade loss"
                         )
                         btc_trade = None
+                        state_changed = True
             elif is_btc_hours and btc_trades_today < 4:
                 btc_df = feed.get_intraday_candles(security_id="BTC-USD", interval="5", days_back=4)
                 if len(btc_df) >= 25:
                     closed_btc = btc_df.iloc[:-1]
-                    btc_ts = closed_btc.iloc[-1]["timestamp"]
-                    if last_btc_candle != btc_ts:
-                        last_btc_candle = btc_ts
+                    btc_ts_str = str(closed_btc.iloc[-1]["timestamp"])
+                    if last_btc_candle != btc_ts_str:
+                        last_btc_candle = btc_ts_str
+                        state_changed = True
                         b_pdh, b_pdl = feed.get_daily_prev_hl("BTC-USD")
                         b_sig = btc_engine.evaluate_spot_signal(closed_btc, b_pdh, b_pdl)
                         if b_sig:
@@ -246,6 +303,7 @@ def run_bot():
                                 "tp1_hit": False,
                                 "tp2_hit": False
                             }
+                            state_changed = True
                             send_telegram(
                                 f"{HEADER}"
                                 f"Trade : {trade_lbl}\n"
@@ -256,6 +314,19 @@ def run_bot():
                                 f"TP-3  : {tp3_v:.2f}"
                             )
 
+            if state_changed:
+                save_state({
+                    "nifty_trade": nifty_trade,
+                    "btc_trade": btc_trade,
+                    "last_nifty_candle": last_nifty_candle,
+                    "last_btc_candle": last_btc_candle,
+                    "nifty_trades_today": nifty_trades_today,
+                    "btc_trades_today": btc_trades_today,
+                    "current_nifty_day": current_nifty_day,
+                    "current_btc_session": current_btc_session,
+                    "last_boot_day": last_boot_day
+                })
+
             time.sleep(4)
 
         except Exception as e:
@@ -264,4 +335,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-                            
+            
