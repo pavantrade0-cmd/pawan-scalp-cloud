@@ -20,6 +20,30 @@ class DhanFeed:
         self._session = requests.Session()
         self._active_sim = {}
 
+    def _fetch_delta_btc_candles(self, resolution="5m", days_back=4):
+        """Fetch live BTCUSD Perpetual candles directly from Delta Exchange India."""
+        end_ts = int(time.time())
+        start_ts = end_ts - int(days_back * 86400)
+        urls = [
+            f"https://api.india.delta.exchange/v2/history/candles?resolution={resolution}&symbol=BTCUSD&start={start_ts}&end={end_ts}",
+            f"https://api.delta.exchange/v2/history/candles?resolution={resolution}&symbol=BTCUSD&start={start_ts}&end={end_ts}"
+        ]
+        for url in urls:
+            try:
+                resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=8)
+                if resp.status_code == 200:
+                    rows = resp.json().get("result", [])
+                    if rows:
+                        df = pd.DataFrame(rows)
+                        df["timestamp"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert(IST)
+                        for col in ["open", "high", "low", "close"]:
+                            df[col] = df[col].astype(float)
+                        df["volume"] = df["volume"].astype(float).replace(0, 1000.0)
+                        return df[["timestamp", "open", "high", "low", "close", "volume"]].sort_values("timestamp").reset_index(drop=True)
+            except Exception:
+                continue
+        return self._fetch_yahoo_candles("BTC-USD", interval=resolution.replace("m", ""), days_back=days_back)
+
     def _fetch_yahoo_candles(self, ticker, interval="5", days_back=5):
         encoded = requests.utils.quote(ticker)
         cb = int(time.time() * 1000)
@@ -66,18 +90,14 @@ class DhanFeed:
             return None, None, None
 
     def _estimate_option_premium(self, spot_val, strike, option_type):
-        """Exact Sahi Option Chain calibration for both CE and PE strikes."""
         if option_type == "CE":
-            # At Spot 25375: 25350 CE = 162.65, 25300 CE = 192.90, 25250 CE = 225.85
             intrinsic = max(0.0, spot_val - strike)
             return round(147.0 + 0.61 * intrinsic, 2)
         else:
-            # At Spot 25375: 25450 PE = 162.40, 25500 PE = 192.00, 25550 PE = 225.00
             intrinsic = max(0.0, strike - spot_val)
             return round(117.0 + 0.60 * intrinsic, 2)
 
     def _calc_dynamic_option_price(self, meta, spot_val):
-        """Tracks live option LTP with exact strike intrinsic + intraday theta decay."""
         entry_ts = meta.get("entry_ts", time.time())
         mins_held = max(0.0, (time.time() - entry_ts) / 60.0)
         theta_decay = min(mins_held * 0.15, 12.0)
@@ -110,7 +130,7 @@ class DhanFeed:
         if sid == "13":
             return self._fetch_yahoo_candles("^NSEI", interval=interval, days_back=days_back)
         if sid == "BTC-USD":
-            return self._fetch_yahoo_candles("BTC-USD", interval=interval, days_back=days_back)
+            return self._fetch_delta_btc_candles(resolution=f"{interval}m", days_back=days_back)
 
         spot_df = self._fetch_yahoo_candles("^NSEI", interval=interval, days_back=days_back)
         if spot_df.empty or sid not in self._active_sim:
@@ -131,7 +151,7 @@ class DhanFeed:
 
     def get_daily_prev_hl(self, ticker="^NSEI"):
         if ticker == "BTC-USD":
-            df = self._fetch_yahoo_candles("BTC-USD", interval="15", days_back=4)
+            df = self._fetch_delta_btc_candles(resolution="15m", days_back=4)
             if df.empty:
                 return None, None
             now_ist = datetime.now(IST)
@@ -164,11 +184,32 @@ class DhanFeed:
         last_day = prev_days.iloc[-1]
         return float(last_day["high"]), float(last_day["low"])
 
-    def get_btc_ltp(self):
+    def get_btc_live_ticks(self):
+        """Fetch live BTCUSD Perpetual mark/close + last 1m high/low from Delta Exchange India."""
+        for url in (
+            "https://api.india.delta.exchange/v2/tickers/BTCUSD",
+            "https://api.delta.exchange/v2/tickers/BTCUSD"
+        ):
+            try:
+                resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=6)
+                if resp.status_code == 200:
+                    res = resp.json().get("result", {})
+                    ltp = float(res.get("close") or res.get("mark_price") or 0.0)
+                    if ltp > 0:
+                        df_1m = self._fetch_delta_btc_candles(resolution="1m", days_back=1)
+                        if len(df_1m) >= 2:
+                            c_high = max(ltp, float(df_1m.iloc[-2]["high"]))
+                            c_low = min(ltp, float(df_1m.iloc[-2]["low"]))
+                            return round(ltp, 2), round(c_high, 2), round(c_low, 2)
+                        return round(ltp, 2), round(ltp, 2), round(ltp, 2)
+            except Exception:
+                continue
+
         df = self._fetch_yahoo_candles("BTC-USD", interval="1", days_back=1)
         if df.empty:
-            return 0.0
-        return round(float(df.iloc[-1]["close"]), 2)
+            return 0.0, 0.0, 0.0
+        val = round(float(df.iloc[-1]["close"]), 2)
+        return val, val, val
 
     def get_option_live_ticks(self, security_id):
         sid_str = str(security_id)
@@ -204,7 +245,6 @@ class DhanFeed:
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
-        # 1. Live NSE Option Chain: lock strike + its own LTP strictly above 180
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
@@ -233,7 +273,6 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # 2. Fallback: scan strikes into ITM until the strike's own Sahi-calibrated premium is > 180
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
@@ -254,3 +293,4 @@ class DhanFeed:
                     "ltp": est_ltp
                 }
         return None
+                
