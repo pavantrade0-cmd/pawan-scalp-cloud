@@ -66,19 +66,30 @@ class DhanFeed:
             return None, None, None
 
     def _estimate_option_premium(self, spot_val, strike, option_type):
-        """Unified Sahi Option Chain curve: computes exact premium for a specific strike."""
-        intrinsic = max(0.0, spot_val - strike) if option_type == "CE" else max(0.0, strike - spot_val)
-        return round(122.0 + 0.56 * intrinsic, 2)
+        """Exact Sahi Option Chain calibration for both CE and PE strikes."""
+        if option_type == "CE":
+            # At Spot 25375: 25350 CE = 162.65, 25300 CE = 192.90, 25250 CE = 225.85
+            intrinsic = max(0.0, spot_val - strike)
+            return round(147.0 + 0.61 * intrinsic, 2)
+        else:
+            # At Spot 25375: 25450 PE = 162.40, 25500 PE = 192.00, 25550 PE = 225.00
+            intrinsic = max(0.0, strike - spot_val)
+            return round(117.0 + 0.60 * intrinsic, 2)
 
     def _calc_dynamic_option_price(self, meta, spot_val):
-        """Tracks live option LTP directly from the locked strike's intrinsic + delta."""
+        """Tracks live option LTP with exact strike intrinsic + intraday theta decay."""
+        entry_ts = meta.get("entry_ts", time.time())
+        mins_held = max(0.0, (time.time() - entry_ts) / 60.0)
+        theta_decay = min(mins_held * 0.15, 12.0)
+
         if "strike" in meta:
             base_est = self._estimate_option_premium(spot_val, meta["strike"], meta["option_type"])
             ref_est = self._estimate_option_premium(meta["ref_spot"], meta["strike"], meta["option_type"])
-            return max(1.0, round(meta["ref_ltp"] + (base_est - ref_est), 2))
+            return max(1.0, round(meta["ref_ltp"] + (base_est - ref_est) - theta_decay, 2))
+
         move = spot_val - meta["ref_spot"] if meta["option_type"] == "CE" else meta["ref_spot"] - spot_val
-        eff_delta = 0.75 if move > 35.0 else (0.65 if move > 15.0 else 0.58)
-        return max(1.0, round(meta["ref_ltp"] + move * eff_delta, 2))
+        eff_delta = 0.75 if move > 35.0 else (0.65 if move > 15.0 else 0.60)
+        return max(1.0, round(meta["ref_ltp"] + move * eff_delta - theta_decay, 2))
 
     def _fetch_nse_option_chain(self):
         try:
@@ -106,7 +117,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.58 if meta["option_type"] == "CE" else -0.58
+        delta = 0.60 if meta["option_type"] == "CE" else -0.60
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -203,7 +214,7 @@ class DhanFeed:
                     candidates.append((ltp, sp))
 
         if candidates:
-            candidates.sort(key=lambda x: x[0])  # Pick the first strike strictly > 180 (closest to 185-205)
+            candidates.sort(key=lambda x: x[0])
             real_ltp, sp = candidates[0]
             strike = int(sp)
             sec_id = f"{strike}_{option_type}"
@@ -211,7 +222,8 @@ class DhanFeed:
                 "strike": float(strike),
                 "ref_spot": ref_spot,
                 "ref_ltp": round(real_ltp, 2),
-                "option_type": option_type
+                "option_type": option_type,
+                "entry_ts": time.time()
             }
             return {
                 "security_id": sec_id,
@@ -221,7 +233,7 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # 2. Fallback: scan strikes into ITM until the strike's own premium is > 180
+        # 2. Fallback: scan strikes into ITM until the strike's own Sahi-calibrated premium is > 180
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
@@ -231,7 +243,8 @@ class DhanFeed:
                     "strike": float(strike),
                     "ref_spot": ref_spot,
                     "ref_ltp": est_ltp,
-                    "option_type": option_type
+                    "option_type": option_type,
+                    "entry_ts": time.time()
                 }
                 return {
                     "security_id": sec_id,
@@ -241,4 +254,3 @@ class DhanFeed:
                     "ltp": est_ltp
                 }
         return None
-        
