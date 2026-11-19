@@ -103,6 +103,7 @@ def run_bot():
     current_nifty_day = state.get("current_nifty_day")
     current_btc_session = state.get("current_btc_session")
     last_boot_day = state.get("last_boot_day")
+    session_alerts = state.get("session_alerts", {})
 
     if nifty_trade and "sim_meta" in nifty_trade:
         feed._active_sim[nifty_trade["security_id"]] = nifty_trade["sim_meta"]
@@ -119,15 +120,47 @@ def run_bot():
             "btc_trades_today": btc_trades_today,
             "current_nifty_day": current_nifty_day,
             "current_btc_session": current_btc_session,
-            "last_boot_day": last_boot_day
+            "last_boot_day": last_boot_day,
+            "session_alerts": session_alerts
         })
 
     while True:
         try:
             now = datetime.now(IST)
             state_changed = False
-
             today_str = str(now.date())
+
+            # ==========================================
+            # SCHEDULED SESSION OPEN / CLOSE ALERTS
+            # ==========================================
+            # 1. NIFTY 50 Open (Mon-Fri 9:10 AM IST)
+            if now.weekday() < 5 and now.hour == 9 and now.minute == 10:
+                if session_alerts.get("nifty_open") != today_str:
+                    session_alerts["nifty_open"] = today_str
+                    state_changed = True
+                    send_telegram(f"{HEADER}Good morning\nNIFTY 50 stock market session opened")
+
+            # 2. NIFTY 50 Close (Mon-Fri 3:15 PM IST)
+            if now.weekday() < 5 and now.hour == 15 and now.minute == 15:
+                if session_alerts.get("nifty_close") != today_str:
+                    session_alerts["nifty_close"] = today_str
+                    state_changed = True
+                    send_telegram(f"{HEADER}Good evening\nNIFTY 50 stock market session closed")
+
+            # 3. BTCUSD Pre-Open (Daily 6:15 PM IST - 15 mins before 6:30 PM session)
+            if now.hour == 18 and now.minute == 15:
+                if session_alerts.get("btc_open") != today_str:
+                    session_alerts["btc_open"] = today_str
+                    state_changed = True
+                    send_telegram(f"{HEADER}Good evening\nBTCUSD crypto market session opened")
+
+            # 4. BTCUSD Close (Daily 6:00 AM IST - session completed)
+            if now.hour == 6 and now.minute == 0:
+                if session_alerts.get("btc_close") != today_str:
+                    session_alerts["btc_close"] = today_str
+                    state_changed = True
+                    send_telegram(f"{HEADER}Good morning\nBTCUSD crypto market session closed")
+
             if current_nifty_day != today_str:
                 current_nifty_day = today_str
                 nifty_trades_today = 0
@@ -324,7 +357,8 @@ def run_bot():
                     "btc_trades_today": btc_trades_today,
                     "current_nifty_day": current_nifty_day,
                     "current_btc_session": current_btc_session,
-                    "last_boot_day": last_boot_day
+                    "last_boot_day": last_boot_day,
+                    "session_alerts": session_alerts
                 })
 
             time.sleep(4)
@@ -335,4 +369,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-                
+    
