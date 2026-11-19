@@ -104,7 +104,6 @@ def run_bot():
     current_btc_session = state.get("current_btc_session")
     last_boot_day = state.get("last_boot_day")
 
-    # Restore simulator anchor if Nifty trade is active across container restart
     if nifty_trade and "sim_meta" in nifty_trade:
         feed._active_sim[nifty_trade["security_id"]] = nifty_trade["sim_meta"]
 
@@ -155,15 +154,15 @@ def run_bot():
                 if nifty_trade:
                     ltp, opt_high, opt_low = feed.get_option_live_ticks(nifty_trade["security_id"])
                     if ltp > 0:
-                        if not nifty_trade["tp1_hit"] and opt_high >= nifty_trade["tp1"]:
+                        if not nifty_trade["tp1_hit"] and opt_high >= (nifty_trade["tp1"] - 0.75):
                             nifty_trade["tp1_hit"] = True
                             state_changed = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-1 hit : {nifty_trade['tp1']:.2f}")
-                        if not nifty_trade["tp2_hit"] and opt_high >= nifty_trade["tp2"]:
+                        if not nifty_trade["tp2_hit"] and opt_high >= (nifty_trade["tp2"] - 0.75):
                             nifty_trade["tp2_hit"] = True
                             state_changed = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-2 hit : {nifty_trade['tp2']:.2f}")
-                        if opt_high >= nifty_trade["tp3"]:
+                        if opt_high >= (nifty_trade["tp3"] - 0.75):
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"TP-3 hit : {nifty_trade['tp3']:.2f}\n"
@@ -202,18 +201,20 @@ def run_bot():
                             if signal:
                                 spot_close = float(closed_df.iloc[-1]["close"])
                                 strike_info = feed.select_strike_above_180(spot_close, option_type=signal["direction"])
-                                if strike_info:
+                                if strike_info and strike_info["ltp"] > 180.0:
                                     opt_df = feed.get_intraday_candles(security_id=strike_info["security_id"], interval="5", days_back=2)
                                     if len(opt_df) >= 12:
                                         risk = nifty_engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
                                         if risk:
                                             nifty_trades_today += 1
-                                            entry_val = risk["entry"]
-                                            sl_val = risk["sl"]
-                                            sl_pts = risk["sl_pts"]
-                                            tp1_val = risk["tp1"]
-                                            tp2_val = risk["tp2"]
-                                            tp3_val = risk["tp3"]
+                                            # Lock Entry strictly to the selected strike's own premium
+                                            entry_val = round(float(strike_info["ltp"]), 2)
+                                            sl_pts = int(round(risk["sl_pts"]))
+                                            sl_pts = min(max(sl_pts, 10), 15)
+                                            sl_val = round(entry_val - sl_pts, 2)
+                                            tp1_val = round(entry_val + sl_pts, 2)
+                                            tp2_val = round(entry_val + sl_pts * 2, 2)
+                                            tp3_val = round(entry_val + sl_pts * 3, 2)
                                             trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
                                             nifty_trade = {
                                                 "security_id": strike_info["security_id"],
@@ -335,4 +336,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-            
+        
