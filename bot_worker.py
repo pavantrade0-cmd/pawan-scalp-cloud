@@ -109,27 +109,28 @@ def run_bot():
             )
 
             if is_nifty_hours:
-                spot_df = feed.get_intraday_candles(security_id="13", interval="5", days_back=4)
-                latest_closed_ts = spot_df.iloc[-2]["timestamp"] if len(spot_df) >= 25 else None
-
                 if nifty_trade:
-                    if latest_closed_ts is not None:
-                        last_nifty_candle = latest_closed_ts
-                    ltp_map = feed.get_option_ltp_bulk([nifty_trade["security_id"]])
-                    ltp = ltp_map.get(nifty_trade["security_id"], 0.0)
+                    ltp, opt_high, opt_low = feed.get_option_live_ticks(nifty_trade["security_id"])
                     if ltp > 0:
-                        if not nifty_trade["tp1_hit"] and ltp >= nifty_trade["tp1"]:
+                        if not nifty_trade["tp1_hit"] and opt_high >= nifty_trade["tp1"]:
                             nifty_trade["tp1_hit"] = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-1 hit : {nifty_trade['tp1']:.2f}")
-                        elif not nifty_trade["tp2_hit"] and ltp >= nifty_trade["tp2"]:
+                        if not nifty_trade["tp2_hit"] and opt_high >= nifty_trade["tp2"]:
                             nifty_trade["tp2_hit"] = True
                             send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-2 hit : {nifty_trade['tp2']:.2f}")
-                        elif ltp >= nifty_trade["tp3"]:
+                        if opt_high >= nifty_trade["tp3"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"TP-3 hit : {nifty_trade['tp3']:.2f}\n"
                                 f"Full target hit\n"
                                 f"Trade close profitably"
+                            )
+                            nifty_trade = None
+                        elif opt_low <= nifty_trade["sl"] and not nifty_trade["tp1_hit"]:
+                            send_telegram(
+                                f"{HEADER}Trade : {nifty_trade['symbol']}\n"
+                                f"SL hit : {nifty_trade['sl']:.2f}\n"
+                                f"Trade loss"
                             )
                             nifty_trade = None
                         elif ltp <= nifty_trade["sl"]:
@@ -139,49 +140,51 @@ def run_bot():
                                 f"Trade loss"
                             )
                             nifty_trade = None
-                elif nifty_trades_today < 3 and not (now.hour == 15 and now.minute >= 0) and len(spot_df) >= 25:
-                    closed_df = spot_df.iloc[:-1]
-                    ts = closed_df.iloc[-1]["timestamp"]
-                    if ts.date() == now.date() and last_nifty_candle != ts:
-                        last_nifty_candle = ts
-                        pdh, pdl = feed.get_daily_prev_hl("^NSEI")
-                        signal = nifty_engine.evaluate_spot_signal(closed_df, pdh, pdl)
-                        if signal:
-                            spot_close = float(closed_df.iloc[-1]["close"])
-                            strike_info = feed.select_strike_above_180(spot_close, option_type=signal["direction"])
-                            if strike_info:
-                                opt_df = feed.get_intraday_candles(security_id=strike_info["security_id"], interval="5", days_back=2)
-                                if len(opt_df) >= 12:
-                                    risk = nifty_engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
-                                    if risk:
-                                        nifty_trades_today += 1
-                                        entry_val = risk["entry"]
-                                        sl_val = risk["sl"]
-                                        sl_pts = risk["sl_pts"]
-                                        tp1_val = risk["tp1"]
-                                        tp2_val = risk["tp2"]
-                                        tp3_val = risk["tp3"]
-                                        trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
-                                        nifty_trade = {
-                                            "security_id": strike_info["security_id"],
-                                            "symbol": trade_label,
-                                            "entry": entry_val,
-                                            "sl": sl_val,
-                                            "tp1": tp1_val,
-                                            "tp2": tp2_val,
-                                            "tp3": tp3_val,
-                                            "tp1_hit": False,
-                                            "tp2_hit": False
-                                        }
-                                        send_telegram(
-                                            f"{HEADER}"
-                                            f"Trade : {trade_label}\n"
-                                            f"Entry : {entry_val:.2f}\n"
-                                            f"SL    : {sl_val:.2f} ({sl_pts} pts)\n"
-                                            f"TP-1  : {tp1_val:.2f}\n"
-                                            f"TP-2  : {tp2_val:.2f}\n"
-                                            f"TP-3  : {tp3_val:.2f}"
-                                        )
+                elif nifty_trades_today < 3 and not (now.hour == 15 and now.minute >= 0):
+                    spot_df = feed.get_intraday_candles(security_id="13", interval="5", days_back=4)
+                    if len(spot_df) >= 25:
+                        closed_df = spot_df.iloc[:-1]
+                        ts = closed_df.iloc[-1]["timestamp"]
+                        if ts.date() == now.date() and last_nifty_candle != ts:
+                            last_nifty_candle = ts
+                            pdh, pdl = feed.get_daily_prev_hl("^NSEI")
+                            signal = nifty_engine.evaluate_spot_signal(closed_df, pdh, pdl)
+                            if signal:
+                                spot_close = float(closed_df.iloc[-1]["close"])
+                                strike_info = feed.select_strike_above_180(spot_close, option_type=signal["direction"])
+                                if strike_info:
+                                    opt_df = feed.get_intraday_candles(security_id=strike_info["security_id"], interval="5", days_back=2)
+                                    if len(opt_df) >= 12:
+                                        risk = nifty_engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
+                                        if risk:
+                                            nifty_trades_today += 1
+                                            entry_val = risk["entry"]
+                                            sl_val = risk["sl"]
+                                            sl_pts = risk["sl_pts"]
+                                            tp1_val = risk["tp1"]
+                                            tp2_val = risk["tp2"]
+                                            tp3_val = risk["tp3"]
+                                            trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
+                                            nifty_trade = {
+                                                "security_id": strike_info["security_id"],
+                                                "symbol": trade_label,
+                                                "entry": entry_val,
+                                                "sl": sl_val,
+                                                "tp1": tp1_val,
+                                                "tp2": tp2_val,
+                                                "tp3": tp3_val,
+                                                "tp1_hit": False,
+                                                "tp2_hit": False
+                                            }
+                                            send_telegram(
+                                                f"{HEADER}"
+                                                f"Trade : {trade_label}\n"
+                                                f"Entry : {entry_val:.2f}\n"
+                                                f"SL    : {sl_val:.2f} ({sl_pts} pts)\n"
+                                                f"TP-1  : {tp1_val:.2f}\n"
+                                                f"TP-2  : {tp2_val:.2f}\n"
+                                                f"TP-3  : {tp3_val:.2f}"
+                                            )
 
             # ==========================================
             # 2. BTC-USD ENGINE (6:30 PM - 6:00 AM IST)
@@ -253,12 +256,12 @@ def run_bot():
                                 f"TP-3  : {tp3_v:.2f}"
                             )
 
-            time.sleep(6)
+            time.sleep(4)
 
         except Exception as e:
             print(f"Loop error: {e}")
-            time.sleep(10)
+            time.sleep(6)
 
 if __name__ == "__main__":
     run_bot()
-                        
+                            
