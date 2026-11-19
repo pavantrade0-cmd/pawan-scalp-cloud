@@ -9,15 +9,18 @@ IST = pytz.timezone("Asia/Kolkata")
 class DhanFeed:
     def __init__(self):
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/option-chain"
         }
+        self._session = requests.Session()
         self._active_sim = {}
 
     def _fetch_yahoo_candles(self, ticker, interval="5", days_back=5):
         encoded = requests.utils.quote(ticker)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval={interval}m&range={days_back}d"
-        resp = requests.get(url, headers=self.headers, timeout=10)
+        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=10)
         res = resp.json().get("chart", {}).get("result", [])
         if not res:
             return pd.DataFrame()
@@ -33,6 +36,20 @@ class DhanFeed:
         }).dropna(subset=["open", "high", "low", "close"])
         return df.sort_values("timestamp").reset_index(drop=True)
 
+    def _fetch_nse_option_chain(self):
+        try:
+            self._session.get("https://www.nseindia.com", headers=self.headers, timeout=5)
+            resp = self._session.get(
+                "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",
+                headers=self.headers,
+                timeout=8
+            )
+            if resp.status_code == 200:
+                return resp.json().get("records", {}).get("data", [])
+        except Exception:
+            pass
+        return []
+
     def get_intraday_candles(self, security_id="13", exchange_segment="IDX_I", instrument="INDEX", interval="5", days_back=5):
         sid = str(security_id)
         if sid == "13":
@@ -45,7 +62,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.58 if meta["option_type"] == "CE" else -0.58
+        delta = 0.62 if meta["option_type"] == "CE" else -0.62
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -58,7 +75,6 @@ class DhanFeed:
         return opt_df
 
     def get_daily_prev_hl(self, ticker="^NSEI"):
-        # For BTC-USD, compute Previous Session High/Low anchored at 6:30 PM IST
         if ticker == "BTC-USD":
             df = self._fetch_yahoo_candles("BTC-USD", interval="15", days_back=4)
             if df.empty:
@@ -73,10 +89,9 @@ class DhanFeed:
                 return None, None
             return float(prev_sess["high"].max()), float(prev_sess["low"].min())
 
-        # Standard Indian Market daily candle for ^NSEI
         encoded = requests.utils.quote(ticker)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1d&range=10d"
-        resp = requests.get(url, headers=self.headers, timeout=10)
+        resp = requests.get(url, headers={"User-Agent": self.headers["User-Agent"]}, timeout=10)
         res = resp.json().get("chart", {}).get("result", [])
         if not res:
             return None, None
@@ -101,22 +116,61 @@ class DhanFeed:
         return round(float(df.iloc[-1]["close"]), 2)
 
     def get_option_ltp_bulk(self, security_ids):
-        spot_df = self._fetch_yahoo_candles("^NSEI", interval="5", days_back=1)
-        if spot_df.empty:
-            return {}
-        curr_spot = float(spot_df.iloc[-1]["close"])
+        oc_data = self._fetch_nse_option_chain()
         out = {}
         for sid in security_ids:
             sid_str = str(sid)
-            if sid_str in self._active_sim:
-                meta = self._active_sim[sid_str]
-                delta = 0.58 if meta["option_type"] == "CE" else -0.58
-                est_ltp = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * delta, 2))
-                out[sid_str] = est_ltp
+            strike_str, opt_type = sid_str.split("_")
+            strike_val = float(strike_str)
+            live_found = False
+
+            for row in oc_data:
+                if float(row.get("strikePrice", 0)) == strike_val and opt_type in row:
+                    ltp = float(row[opt_type].get("lastPrice", 0))
+                    if ltp > 0:
+                        out[sid_str] = round(ltp, 2)
+                        live_found = True
+                        break
+
+            if not live_found and sid_str in self._active_sim:
+                spot_df = self._fetch_yahoo_candles("^NSEI", interval="5", days_back=1)
+                if not spot_df.empty:
+                    curr_spot = float(spot_df.iloc[-1]["close"])
+                    meta = self._active_sim[sid_str]
+                    delta = 0.62 if meta["option_type"] == "CE" else -0.62
+                    out[sid_str] = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * delta, 2))
         return out
 
     def select_strike_above_180(self, spot_price, option_type="CE"):
         atm = round(spot_price / 50.0) * 50
+        oc_data = self._fetch_nse_option_chain()
+
+        candidates = []
+        for row in oc_data:
+            sp = float(row.get("strikePrice", 0))
+            if opt_type in row:
+                ltp = float(row[opt_type].get("lastPrice", 0))
+                if 185.0 <= ltp <= 320.0:
+                    candidates.append((abs(sp - atm), sp, ltp))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            _, strike, real_ltp = candidates[0]
+            strike = int(strike)
+            sec_id = f"{strike}_{option_type}"
+            self._active_sim[sec_id] = {
+                "ref_spot": spot_price,
+                "ref_ltp": real_ltp,
+                "option_type": option_type
+            }
+            return {
+                "security_id": sec_id,
+                "symbol": f"NIFTY {strike} {option_type}",
+                "strike": float(strike),
+                "option_type": option_type,
+                "ltp": round(real_ltp, 2)
+            }
+
         if option_type == "CE":
             strike = int(atm - 150)
             intrinsic = max(0.0, spot_price - strike)
@@ -124,7 +178,7 @@ class DhanFeed:
             strike = int(atm + 150)
             intrinsic = max(0.0, strike - spot_price)
 
-        est_ltp = round(max(185.0, intrinsic + 55.0), 2)
+        est_ltp = round(max(195.0, intrinsic + 85.0), 2)
         sec_id = f"{strike}_{option_type}"
         self._active_sim[sec_id] = {
             "ref_spot": spot_price,
@@ -137,5 +191,5 @@ class DhanFeed:
             "strike": float(strike),
             "option_type": option_type,
             "ltp": est_ltp
-            }
+    }
         
