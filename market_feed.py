@@ -62,7 +62,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.62 if meta["option_type"] == "CE" else -0.62
+        delta = 0.54 if meta["option_type"] == "CE" else -0.54
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -137,7 +137,7 @@ class DhanFeed:
                 if not spot_df.empty:
                     curr_spot = float(spot_df.iloc[-1]["close"])
                     meta = self._active_sim[sid_str]
-                    delta = 0.62 if meta["option_type"] == "CE" else -0.62
+                    delta = 0.54 if meta["option_type"] == "CE" else -0.54
                     out[sid_str] = max(1.0, round(meta["ref_ltp"] + (curr_spot - meta["ref_spot"]) * delta, 2))
         return out
 
@@ -171,14 +171,15 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
+        # Calibrated ITM pricing (matches ~190-215 live premium range)
         if option_type == "CE":
-            strike = int(atm - 150)
+            strike = int(atm - 100)
             intrinsic = max(0.0, spot_price - strike)
         else:
-            strike = int(atm + 150)
+            strike = int(atm + 100)
             intrinsic = max(0.0, strike - spot_price)
 
-        est_ltp = round(max(195.0, intrinsic + 85.0), 2)
+        est_ltp = round(max(185.0, intrinsic + 68.0), 2)
         sec_id = f"{strike}_{option_type}"
         self._active_sim[sec_id] = {
             "ref_spot": spot_price,
@@ -191,5 +192,5 @@ class DhanFeed:
             "strike": float(strike),
             "option_type": option_type,
             "ltp": est_ltp
-    }
-        
+            }
+                
