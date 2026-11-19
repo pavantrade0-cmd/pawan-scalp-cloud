@@ -69,16 +69,16 @@ def calculate_btc_levels(closed_df, side):
     recent = closed_df.iloc[-6:]
     if side == "LONG":
         swing_low = float(recent["low"].min())
-        raw_risk = entry - swing_low + 25.0
-        risk = min(max(raw_risk, 150.0), 400.0)
+        raw_risk = entry - swing_low + 35.0
+        risk = min(max(raw_risk, 180.0), 400.0)
         sl = round(entry - risk, 2)
         tp1 = round(entry + risk, 2)
         tp2 = round(entry + risk * 2, 2)
         tp3 = round(entry + risk * 3, 2)
     else:
         swing_high = float(recent["high"].max())
-        raw_risk = swing_high - entry + 25.0
-        risk = min(max(raw_risk, 150.0), 400.0)
+        raw_risk = swing_high - entry + 35.0
+        risk = min(max(raw_risk, 180.0), 400.0)
         sl = round(entry + risk, 2)
         tp1 = round(entry - risk, 2)
         tp2 = round(entry - risk * 2, 2)
@@ -89,7 +89,7 @@ def run_bot():
     threading.Thread(target=start_health_server, daemon=True).start()
     feed = DhanFeed()
     nifty_engine = InstitutionalLevelEngine(zone_buffer=12.0, min_sl=10.0, max_sl=15.0)
-    btc_engine = InstitutionalLevelEngine(zone_buffer=80.0, min_sl=150.0, max_sl=400.0)
+    btc_engine = InstitutionalLevelEngine(zone_buffer=140.0, min_sl=180.0, max_sl=400.0)
 
     now_boot = datetime.now(IST)
     state = load_state()
@@ -104,6 +104,8 @@ def run_bot():
     current_btc_session = state.get("current_btc_session")
     last_boot_day = state.get("last_boot_day")
     session_alerts = state.get("session_alerts", {})
+    btc_cooldown_until = state.get("btc_cooldown_until", 0)
+    nifty_cooldown_until = state.get("nifty_cooldown_until", 0)
 
     if nifty_trade and "sim_meta" in nifty_trade:
         feed._active_sim[nifty_trade["security_id"]] = nifty_trade["sim_meta"]
@@ -121,12 +123,15 @@ def run_bot():
             "current_nifty_day": current_nifty_day,
             "current_btc_session": current_btc_session,
             "last_boot_day": last_boot_day,
-            "session_alerts": session_alerts
+            "session_alerts": session_alerts,
+            "btc_cooldown_until": btc_cooldown_until,
+            "nifty_cooldown_until": nifty_cooldown_until
         })
 
     while True:
         try:
             now = datetime.now(IST)
+            now_ts = time.time()
             state_changed = False
             today_str = str(now.date())
             date_banner = now.strftime("%A, %d %B %Y")
@@ -134,7 +139,6 @@ def run_bot():
             # ==========================================
             # SCHEDULED SESSION OPEN / CLOSE ALERTS
             # ==========================================
-            # 1. NIFTY 50 Open (Mon-Fri 9:10 AM IST)
             if now.weekday() < 5 and now.hour == 9 and now.minute == 10:
                 if session_alerts.get("nifty_open") != today_str:
                     session_alerts["nifty_open"] = today_str
@@ -145,7 +149,6 @@ def run_bot():
                         f"NIFTY 50 stock market session opened"
                     )
 
-            # 2. NIFTY 50 Close (Mon-Fri 3:15 PM IST)
             if now.weekday() < 5 and now.hour == 15 and now.minute == 15:
                 if session_alerts.get("nifty_close") != today_str:
                     session_alerts["nifty_close"] = today_str
@@ -156,7 +159,6 @@ def run_bot():
                         f"NIFTY 50 stock market session closed"
                     )
 
-            # 3. BTCUSD Pre-Open (Daily 6:15 PM IST - 15 mins before 6:30 PM session)
             if now.hour == 18 and now.minute == 15:
                 if session_alerts.get("btc_open") != today_str:
                     session_alerts["btc_open"] = today_str
@@ -167,7 +169,6 @@ def run_bot():
                         f"BTCUSD crypto market session opened"
                     )
 
-            # 4. BTCUSD Close (Daily 6:00 AM IST - session completed)
             if now.hour == 6 and now.minute == 0:
                 if session_alerts.get("btc_close") != today_str:
                     session_alerts["btc_close"] = today_str
@@ -204,14 +205,6 @@ def run_bot():
                 if nifty_trade:
                     ltp, opt_high, opt_low = feed.get_option_live_ticks(nifty_trade["security_id"])
                     if ltp > 0:
-                        if not nifty_trade["tp1_hit"] and opt_high >= (nifty_trade["tp1"] - 0.75):
-                            nifty_trade["tp1_hit"] = True
-                            state_changed = True
-                            send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-1 hit : {nifty_trade['tp1']:.2f}")
-                        if not nifty_trade["tp2_hit"] and opt_high >= (nifty_trade["tp2"] - 0.75):
-                            nifty_trade["tp2_hit"] = True
-                            state_changed = True
-                            send_telegram(f"{HEADER}Trade : {nifty_trade['symbol']}\nTP-2 hit : {nifty_trade['tp2']:.2f}")
                         if opt_high >= (nifty_trade["tp3"] - 0.75):
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
@@ -220,24 +213,18 @@ def run_bot():
                                 f"Trade close profitably"
                             )
                             nifty_trade = None
+                            nifty_cooldown_until = now_ts + 600
                             state_changed = True
-                        elif opt_low <= (nifty_trade["sl"] + 0.75) and not nifty_trade["tp1_hit"]:
+                        elif opt_low <= (nifty_trade["sl"] + 0.75) or ltp <= (nifty_trade["sl"] + 0.75):
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"SL hit : {nifty_trade['sl']:.2f}\n"
                                 f"Trade loss"
                             )
                             nifty_trade = None
+                            nifty_cooldown_until = now_ts + 600
                             state_changed = True
-                        elif ltp <= (nifty_trade["sl"] + 0.75):
-                            send_telegram(
-                                f"{HEADER}Trade : {nifty_trade['symbol']}\n"
-                                f"SL hit : {nifty_trade['sl']:.2f}\n"
-                                f"Trade loss"
-                            )
-                            nifty_trade = None
-                            state_changed = True
-                elif nifty_trades_today < 3 and not (now.hour == 15 and now.minute >= 0):
+                elif nifty_trades_today < 3 and now_ts >= nifty_cooldown_until and not (now.hour == 15 and now.minute >= 0):
                     spot_df = feed.get_intraday_candles(security_id="13", interval="5", days_back=4)
                     if len(spot_df) >= 25:
                         closed_df = spot_df.iloc[:-1]
@@ -273,8 +260,6 @@ def run_bot():
                                                 "tp1": tp1_val,
                                                 "tp2": tp2_val,
                                                 "tp3": tp3_val,
-                                                "tp1_hit": False,
-                                                "tp2_hit": False,
                                                 "sim_meta": feed._active_sim.get(strike_info["security_id"])
                                             }
                                             state_changed = True
@@ -294,23 +279,23 @@ def run_bot():
             is_btc_hours = (now.hour > 18) or (now.hour == 18 and now.minute >= 30) or (now.hour < 6)
 
             if btc_trade:
-                btc_ltp = feed.get_btc_ltp()
+                btc_ltp, btc_high, btc_low = feed.get_btc_live_ticks()
                 if btc_ltp > 0:
                     is_long = btc_trade["side"] == "LONG"
-                    hit_tp1 = (btc_ltp >= btc_trade["tp1"]) if is_long else (btc_ltp <= btc_trade["tp1"])
-                    hit_tp2 = (btc_ltp >= btc_trade["tp2"]) if is_long else (btc_ltp <= btc_trade["tp2"])
-                    hit_tp3 = (btc_ltp >= btc_trade["tp3"]) if is_long else (btc_ltp <= btc_trade["tp3"])
-                    hit_sl = (btc_ltp <= btc_trade["sl"]) if is_long else (btc_ltp >= btc_trade["sl"])
+                    hit_tp1 = (btc_high >= (btc_trade["tp1"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp1"] + 10.0))
+                    hit_tp2 = (btc_high >= (btc_trade["tp2"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp2"] + 10.0))
+                    hit_tp3 = (btc_high >= (btc_trade["tp3"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp3"] + 10.0))
+                    hit_sl = (btc_low <= (btc_trade["sl"] + 10.0)) if is_long else (btc_high >= (btc_trade["sl"] - 10.0))
 
-                    if not btc_trade["tp1_hit"] and hit_tp1:
+                    if not btc_trade.get("tp1_hit") and hit_tp1:
                         btc_trade["tp1_hit"] = True
                         state_changed = True
                         send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-1 hit : {btc_trade['tp1']:.2f}")
-                    elif not btc_trade["tp2_hit"] and hit_tp2:
+                    if not btc_trade.get("tp2_hit") and hit_tp2:
                         btc_trade["tp2_hit"] = True
                         state_changed = True
                         send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-2 hit : {btc_trade['tp2']:.2f}")
-                    elif hit_tp3:
+                    if hit_tp3:
                         send_telegram(
                             f"{HEADER}Trade : {btc_trade['symbol']}\n"
                             f"TP-3 hit : {btc_trade['tp3']:.2f}\n"
@@ -318,6 +303,7 @@ def run_bot():
                             f"Trade close profitably"
                         )
                         btc_trade = None
+                        btc_cooldown_until = now_ts + 900
                         state_changed = True
                     elif hit_sl:
                         send_telegram(
@@ -326,8 +312,9 @@ def run_bot():
                             f"Trade loss"
                         )
                         btc_trade = None
+                        btc_cooldown_until = now_ts + 900
                         state_changed = True
-            elif is_btc_hours and btc_trades_today < 4:
+            elif is_btc_hours and btc_trades_today < 4 and now_ts >= btc_cooldown_until:
                 btc_df = feed.get_intraday_candles(security_id="BTC-USD", interval="5", days_back=4)
                 if len(btc_df) >= 25:
                     closed_btc = btc_df.iloc[:-1]
@@ -375,7 +362,9 @@ def run_bot():
                     "current_nifty_day": current_nifty_day,
                     "current_btc_session": current_btc_session,
                     "last_boot_day": last_boot_day,
-                    "session_alerts": session_alerts
+                    "session_alerts": session_alerts,
+                    "btc_cooldown_until": btc_cooldown_until,
+                    "nifty_cooldown_until": nifty_cooldown_until
                 })
 
             time.sleep(4)
@@ -386,3 +375,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+        
