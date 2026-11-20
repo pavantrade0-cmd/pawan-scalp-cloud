@@ -17,6 +17,7 @@ STATE_FILE = "bot_state.json"
 
 HEADER = "<b><code>[From cloud server]</code></b>\n\n"
 
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -50,10 +51,12 @@ class HealthHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+
 def start_health_server():
     port = int(os.getenv("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
+
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -69,6 +72,7 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}", flush=True)
 
+
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -78,12 +82,14 @@ def load_state():
             pass
     return {}
 
+
 def save_state(state):
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
     except Exception as e:
         print(f"State save error: {e}", flush=True)
+
 
 def calculate_btc_levels(closed_df, side):
     entry = float(closed_df.iloc[-1]["close"])
@@ -103,6 +109,7 @@ def calculate_btc_levels(closed_df, side):
         tp1 = round(entry - risk, 2)
         tp2 = round(entry - risk * 2, 2)
     return round(entry, 2), sl, int(round(risk)), tp1, tp2
+
 
 def run_bot():
     threading.Thread(target=start_health_server, daemon=True).start()
@@ -156,9 +163,6 @@ def run_bot():
             today_str = str(now.date())
             date_banner = now.strftime("%A, %d %B %Y")
 
-            # ==========================================
-            # SCHEDULED SESSION OPEN / CLOSE ALERTS
-            # ==========================================
             if now.weekday() < 5 and now.hour == 9 and now.minute == 10:
                 if session_alerts.get("nifty_open") != today_str:
                     session_alerts["nifty_open"] = today_str
@@ -212,9 +216,6 @@ def run_bot():
                 btc_trades_today = 0
                 state_changed = True
 
-            # ==========================================
-            # 1. NIFTY 50 ENGINE (Instant TP-1, TP-2, TP-3 & SL)
-            # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 25)
                 or (10 <= now.hour <= 14)
@@ -314,9 +315,6 @@ def run_bot():
                                                 f"TP-3  : {tp3_val:.2f}"
                                             )
 
-            # ==========================================
-            # 2. BTC-USD ENGINE (Instant TP-1, TP-2 & SL | 1:2 Target)
-            # ==========================================
             is_btc_hours = (now.hour > 18) or (now.hour == 18 and now.minute >= 30) or (now.hour < 6)
 
             if btc_trade:
@@ -408,6 +406,7 @@ def run_bot():
         except Exception as e:
             print(f"Loop error: {e}", flush=True)
             time.sleep(3)
+
 
 if __name__ == "__main__":
     run_bot()
