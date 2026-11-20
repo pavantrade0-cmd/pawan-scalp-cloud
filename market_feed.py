@@ -1,4 +1,3 @@
-
 import os
 import json
 import time
@@ -11,6 +10,7 @@ import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
 FYERS_TOKEN_FILE = "fyers_token.json"
+
 
 class DhanFeed:
     def __init__(self, skip_init=False):
@@ -33,7 +33,6 @@ class DhanFeed:
             self._init_fyers_token()
 
     def reload_token_if_updated(self):
-        """Hot-reloads newly activated Fyers token from disk without restarting the worker."""
         if os.path.exists(FYERS_TOKEN_FILE):
             try:
                 mtime = os.path.getmtime(FYERS_TOKEN_FILE)
@@ -47,7 +46,6 @@ class DhanFeed:
                 pass
 
     def _init_fyers_token(self, force_exchange=False):
-        """Automatically exchanges auth_code for an access_token and caches it."""
         if not force_exchange:
             if self.fyers_access_token:
                 print("Fyers Access Token loaded from ENV!", flush=True)
@@ -91,7 +89,6 @@ class DhanFeed:
                 print(f"Fyers token exchange error: {e}", flush=True)
 
     def _fetch_delta_btc_candles(self, resolution="5m", days_back=4):
-        """Fetch live BTCUSD Perpetual candles directly from Delta Exchange India."""
         end_ts = int(time.time())
         start_ts = end_ts - int(days_back * 86400)
         urls = [
@@ -176,7 +173,6 @@ class DhanFeed:
             return None, None, None
 
     def _fetch_fyers_option_chain(self):
-        """Fetch real-time NIFTY 50 option chain directly from Fyers API v3."""
         if not self.fyers_app_id or not self.fyers_access_token:
             return []
         try:
@@ -373,13 +369,11 @@ class DhanFeed:
         return 0.0, 0.0, 0.0
 
     def select_strike_above_150(self, spot_price, option_type="CE"):
-        """Selects the first strike strictly above ₹150 separately for CE side or PE side."""
         live_spot, _, _ = self._get_live_nifty_spot()
         ref_spot = live_spot if live_spot else spot_price
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
-        # 1. Live Fyers / NSE Option Chain: separate lookup for CE vs PE strike > ₹150
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
@@ -410,7 +404,6 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # 2. Fallback: scan CE side or PE side for first strike > ₹150
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
@@ -426,4 +419,9 @@ class DhanFeed:
                 return {
                     "security_id": sec_id,
                     "symbol": f"NIFTY {strike} {option_type}",
-                    "strike": f
+                    "strike": float(strike),
+                    "option_type": option_type,
+                    "ltp": est_ltp
+                }
+        return None
+        
