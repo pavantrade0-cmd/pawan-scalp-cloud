@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import requests
+from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 import pytz
@@ -18,6 +19,26 @@ HEADER = "<b><code>[From cloud server]</code></b>\n\n"
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/fyers-callback":
+            params = parse_qs(parsed.query)
+            auth_code = params.get("auth_code", [""])[0]
+            if auth_code:
+                temp_feed = DhanFeed(skip_init=True)
+                temp_feed.fyers_auth_code = auth_code
+                temp_feed.fyers_access_token = ""
+                temp_feed._init_fyers_token(force_exchange=True)
+                status_msg = (
+                    b"Fyers Access Token Activated Successfully! You can close this tab."
+                    if temp_feed.fyers_access_token
+                    else b"Fyers Token Activation Failed. Check Render Logs."
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(status_msg)
+                return
+
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
@@ -36,7 +57,7 @@ def start_health_server():
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(msg)
+        print(msg, flush=True)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -46,7 +67,7 @@ def send_telegram(msg):
             timeout=6
         )
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Telegram error: {e}", flush=True)
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -62,7 +83,7 @@ def save_state(state):
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
     except Exception as e:
-        print(f"State save error: {e}")
+        print(f"State save error: {e}", flush=True)
 
 def calculate_btc_levels(closed_df, side):
     entry = float(closed_df.iloc[-1]["close"])
@@ -128,6 +149,7 @@ def run_bot():
 
     while True:
         try:
+            feed.reload_token_if_updated()
             now = datetime.now(IST)
             now_ts = time.time()
             state_changed = False
@@ -384,8 +406,9 @@ def run_bot():
             time.sleep(1.5)
 
         except Exception as e:
-            print(f"Loop error: {e}")
+            print(f"Loop error: {e}", flush=True)
             time.sleep(3)
 
 if __name__ == "__main__":
     run_bot()
+        
