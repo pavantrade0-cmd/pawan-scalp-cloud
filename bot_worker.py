@@ -101,7 +101,7 @@ def calculate_btc_levels(closed_df, side):
     if side == "LONG":
         swing_low = float(recent["low"].min())
         raw_risk = entry - swing_low + 35.0
-        risk = int(round(min(max(raw_risk, 180.0), 400.0)))
+        risk = int(round(min(max(raw_risk, 180.0), 250.0)))
         sl = entry - risk
         tp1 = entry + risk
         tp2 = entry + risk * 2
@@ -109,7 +109,7 @@ def calculate_btc_levels(closed_df, side):
     else:
         swing_high = float(recent["high"].max())
         raw_risk = swing_high - entry + 35.0
-        risk = int(round(min(max(raw_risk, 180.0), 400.0)))
+        risk = int(round(min(max(raw_risk, 180.0), 250.0)))
         sl = entry + risk
         tp1 = entry - risk
         tp2 = entry - risk * 2
@@ -121,7 +121,7 @@ def run_bot():
     threading.Thread(target=start_health_server, daemon=True).start()
     feed = DhanFeed()
     nifty_engine = InstitutionalLevelEngine(zone_buffer=12.0, min_sl=10.0, max_sl=15.0)
-    btc_engine = InstitutionalLevelEngine(zone_buffer=140.0, min_sl=180.0, max_sl=400.0)
+    btc_engine = InstitutionalLevelEngine(zone_buffer=140.0, min_sl=180.0, max_sl=250.0)
 
     now_boot = datetime.now(IST)
     state = load_state()
@@ -427,4 +427,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-    
+                          
