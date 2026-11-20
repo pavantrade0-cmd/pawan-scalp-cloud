@@ -74,7 +74,6 @@ def calculate_btc_levels(closed_df, side):
         sl = round(entry - risk, 2)
         tp1 = round(entry + risk, 2)
         tp2 = round(entry + risk * 2, 2)
-        tp3 = round(entry + risk * 3, 2)
     else:
         swing_high = float(recent["high"].max())
         raw_risk = swing_high - entry + 35.0
@@ -82,8 +81,7 @@ def calculate_btc_levels(closed_df, side):
         sl = round(entry + risk, 2)
         tp1 = round(entry - risk, 2)
         tp2 = round(entry - risk * 2, 2)
-        tp3 = round(entry - risk * 3, 2)
-    return round(entry, 2), sl, int(round(risk)), tp1, tp2, tp3
+    return round(entry, 2), sl, int(round(risk)), tp1, tp2
 
 def run_bot():
     threading.Thread(target=start_health_server, daemon=True).start()
@@ -194,6 +192,7 @@ def run_bot():
 
             # ==========================================
             # 1. NIFTY 50 ENGINE (Mon-Fri 9:25 - 15:15 IST)
+            #    Entry -> Instant SL OR Direct TP-3 Only
             # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 25)
@@ -274,7 +273,7 @@ def run_bot():
                                             )
 
             # ==========================================
-            # 2. BTC-USD ENGINE (6:30 PM - 6:00 AM IST)
+            # 2. BTC-USD ENGINE (6:30 PM - 6:00 AM IST | 1:2 Target)
             # ==========================================
             is_btc_hours = (now.hour > 18) or (now.hour == 18 and now.minute >= 30) or (now.hour < 6)
 
@@ -284,21 +283,16 @@ def run_bot():
                     is_long = btc_trade["side"] == "LONG"
                     hit_tp1 = (btc_high >= (btc_trade["tp1"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp1"] + 10.0))
                     hit_tp2 = (btc_high >= (btc_trade["tp2"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp2"] + 10.0))
-                    hit_tp3 = (btc_high >= (btc_trade["tp3"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp3"] + 10.0))
                     hit_sl = (btc_low <= (btc_trade["sl"] + 10.0)) if is_long else (btc_high >= (btc_trade["sl"] - 10.0))
 
                     if not btc_trade.get("tp1_hit") and hit_tp1:
                         btc_trade["tp1_hit"] = True
                         state_changed = True
                         send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-1 hit : {btc_trade['tp1']:.2f}")
-                    if not btc_trade.get("tp2_hit") and hit_tp2:
-                        btc_trade["tp2_hit"] = True
-                        state_changed = True
-                        send_telegram(f"{HEADER}Trade : {btc_trade['symbol']}\nTP-2 hit : {btc_trade['tp2']:.2f}")
-                    if hit_tp3:
+                    if hit_tp2:
                         send_telegram(
                             f"{HEADER}Trade : {btc_trade['symbol']}\n"
-                            f"TP-3 hit : {btc_trade['tp3']:.2f}\n"
+                            f"TP-2 hit : {btc_trade['tp2']:.2f}\n"
                             f"Full target hit\n"
                             f"Trade close profitably"
                         )
@@ -327,7 +321,7 @@ def run_bot():
                         if b_sig:
                             btc_trades_today += 1
                             side = "LONG" if b_sig["direction"] == "CE" else "SHORT"
-                            entry_v, sl_v, sl_p, tp1_v, tp2_v, tp3_v = calculate_btc_levels(closed_btc, side)
+                            entry_v, sl_v, sl_p, tp1_v, tp2_v = calculate_btc_levels(closed_btc, side)
                             trade_lbl = f"BTC {side}"
                             btc_trade = {
                                 "symbol": trade_lbl,
@@ -336,9 +330,7 @@ def run_bot():
                                 "sl": sl_v,
                                 "tp1": tp1_v,
                                 "tp2": tp2_v,
-                                "tp3": tp3_v,
-                                "tp1_hit": False,
-                                "tp2_hit": False
+                                "tp1_hit": False
                             }
                             state_changed = True
                             send_telegram(
@@ -347,8 +339,7 @@ def run_bot():
                                 f"Entry : {entry_v:.2f}\n"
                                 f"SL    : {sl_v:.2f} ({sl_p} pts)\n"
                                 f"TP-1  : {tp1_v:.2f}\n"
-                                f"TP-2  : {tp2_v:.2f}\n"
-                                f"TP-3  : {tp3_v:.2f}"
+                                f"TP-2  : {tp2_v:.2f}"
                             )
 
             if state_changed:
@@ -375,4 +366,3 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-        
