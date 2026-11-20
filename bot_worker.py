@@ -192,7 +192,7 @@ def run_bot():
 
             # ==========================================
             # 1. NIFTY 50 ENGINE (Mon-Fri 9:25 - 15:15 IST)
-            #    Entry -> Instant SL OR Direct TP-3 Only
+            #    Trade label: CE / PE only
             # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 25)
@@ -250,7 +250,7 @@ def run_bot():
                                             tp1_val = round(entry_val + sl_pts, 2)
                                             tp2_val = round(entry_val + sl_pts * 2, 2)
                                             tp3_val = round(entry_val + sl_pts * 3, 2)
-                                            trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
+                                            trade_label = f"{strike_info['option_type']}"
                                             nifty_trade = {
                                                 "security_id": strike_info["security_id"],
                                                 "symbol": trade_label,
@@ -366,3 +366,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
+    
