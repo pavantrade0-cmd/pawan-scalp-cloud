@@ -90,6 +90,7 @@ class DhanFeed:
             return None, None, None
 
     def _estimate_option_premium(self, spot_val, strike, option_type):
+        """Exact Sahi Option Chain calibration for both CE and PE strikes."""
         if option_type == "CE":
             intrinsic = max(0.0, spot_val - strike)
             return round(147.0 + 0.61 * intrinsic, 2)
@@ -108,7 +109,7 @@ class DhanFeed:
             return max(1.0, round(meta["ref_ltp"] + (base_est - ref_est) - theta_decay, 2))
 
         move = spot_val - meta["ref_spot"] if meta["option_type"] == "CE" else meta["ref_spot"] - spot_val
-        eff_delta = 0.75 if move > 35.0 else (0.65 if move > 15.0 else 0.60)
+        eff_delta = 0.78 if move > 35.0 else (0.66 if move > 15.0 else 0.60)
         return max(1.0, round(meta["ref_ltp"] + move * eff_delta - theta_decay, 2))
 
     def _fetch_nse_option_chain(self):
@@ -185,7 +186,6 @@ class DhanFeed:
         return float(last_day["high"]), float(last_day["low"])
 
     def get_btc_live_ticks(self):
-        """Fetch live BTCUSD Perpetual mark/close + last 1m high/low from Delta Exchange India."""
         for url in (
             "https://api.india.delta.exchange/v2/tickers/BTCUSD",
             "https://api.delta.exchange/v2/tickers/BTCUSD"
@@ -245,6 +245,7 @@ class DhanFeed:
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
+        # 1. Live NSE Option Chain: lock strike + its own LTP strictly above 180
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
@@ -273,6 +274,7 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
+        # 2. Fallback: scan strikes into ITM until the strike's own Sahi-calibrated premium > 180
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
@@ -293,4 +295,4 @@ class DhanFeed:
                     "ltp": est_ltp
                 }
         return None
-                
+        
