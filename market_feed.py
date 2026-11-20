@@ -90,11 +90,13 @@ class DhanFeed:
             return None, None, None
 
     def _estimate_option_premium(self, spot_val, strike, option_type):
-        """Exact Sahi Option Chain calibration for both CE and PE strikes."""
+        """Separate Sahi Option Chain curve for CE side and PE side."""
         if option_type == "CE":
+            # CE side: e.g. at Spot 25375 -> 25350 CE = 162.65 (>150), 25300 CE = 192.90
             intrinsic = max(0.0, spot_val - strike)
             return round(147.0 + 0.61 * intrinsic, 2)
         else:
+            # PE side: e.g. at Spot 25375 -> 25450 PE = 162.40 (>150), 25500 PE = 192.00
             intrinsic = max(0.0, strike - spot_val)
             return round(117.0 + 0.60 * intrinsic, 2)
 
@@ -239,19 +241,20 @@ class DhanFeed:
 
         return 0.0, 0.0, 0.0
 
-    def select_strike_above_180(self, spot_price, option_type="CE"):
+    def select_strike_above_150(self, spot_price, option_type="CE"):
+        """Selects the first strike strictly above ₹150 separately for CE side or PE side."""
         live_spot, _, _ = self._get_live_nifty_spot()
         ref_spot = live_spot if live_spot else spot_price
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
-        # 1. Live NSE Option Chain: lock strike + its own LTP strictly above 180
+        # 1. Live NSE Option Chain: separate lookup for CE vs PE strike > ₹150
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
             if opt_type in row:
                 ltp = float(row[opt_type].get("lastPrice", 0))
-                if 182.0 <= ltp <= 250.0:
+                if 152.0 <= ltp <= 230.0:
                     candidates.append((ltp, sp))
 
         if candidates:
@@ -274,11 +277,11 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # 2. Fallback: scan strikes into ITM until the strike's own Sahi-calibrated premium > 180
+        # 2. Fallback: scan CE side (ITM downwards) or PE side (ITM upwards) for first strike > ₹150
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
-            if est_ltp > 180.0:
+            if est_ltp > 150.0:
                 sec_id = f"{strike}_{option_type}"
                 self._active_sim[sec_id] = {
                     "strike": float(strike),
