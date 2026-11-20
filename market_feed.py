@@ -32,6 +32,7 @@ class DhanFeed:
     def _init_fyers_token(self):
         """Automatically exchanges FYERS_AUTH_CODE for an access_token and caches it."""
         if self.fyers_access_token:
+            print("Fyers Access Token loaded from ENV!", flush=True)
             return
         if os.path.exists(FYERS_TOKEN_FILE):
             try:
@@ -39,6 +40,7 @@ class DhanFeed:
                     saved = json.load(f)
                 if saved.get("auth_code") == self.fyers_auth_code and saved.get("access_token"):
                     self.fyers_access_token = saved["access_token"]
+                    print("Fyers Access Token loaded from cache!", flush=True)
                     return
             except Exception:
                 pass
@@ -55,16 +57,17 @@ class DhanFeed:
                     },
                     timeout=8
                 )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    tok = data.get("access_token", "")
-                    if tok:
-                        self.fyers_access_token = tok
-                        with open(FYERS_TOKEN_FILE, "w") as f:
-                            json.dump({"auth_code": self.fyers_auth_code, "access_token": tok}, f)
-                        print("Fyers Access Token activated successfully!")
+                data = resp.json()
+                tok = data.get("access_token", "")
+                if tok:
+                    self.fyers_access_token = tok
+                    with open(FYERS_TOKEN_FILE, "w") as f:
+                        json.dump({"auth_code": self.fyers_auth_code, "access_token": tok}, f)
+                    print("Fyers Access Token activated successfully!", flush=True)
+                else:
+                    print(f"Fyers token failed: {data}", flush=True)
             except Exception as e:
-                print(f"Fyers token exchange error: {e}")
+                print(f"Fyers token exchange error: {e}", flush=True)
 
     def _fetch_delta_btc_candles(self, resolution="5m", days_back=4):
         """Fetch live BTCUSD Perpetual candles directly from Delta Exchange India."""
@@ -407,4 +410,4 @@ class DhanFeed:
                     "ltp": est_ltp
                 }
         return None
-                            
+                    
