@@ -43,7 +43,7 @@ def send_telegram(msg):
         requests.post(
             url,
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=8
+            timeout=6
         )
     except Exception as e:
         print(f"Telegram error: {e}")
@@ -191,8 +191,7 @@ def run_bot():
                 state_changed = True
 
             # ==========================================
-            # 1. NIFTY 50 ENGINE (Mon-Fri 9:25 - 15:15 IST)
-            #    Separate CE / PE > ₹150 strike selection + Strike & CE/PE label
+            # 1. NIFTY 50 ENGINE (Instant TP-1, TP-2, TP-3 & SL)
             # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 25)
@@ -204,7 +203,26 @@ def run_bot():
                 if nifty_trade:
                     ltp, opt_high, opt_low = feed.get_option_live_ticks(nifty_trade["security_id"])
                     if ltp > 0:
-                        if opt_high >= (nifty_trade["tp3"] - 0.75):
+                        peak_price = max(ltp, opt_high)
+                        trough_price = min(ltp, opt_low)
+
+                        if not nifty_trade.get("tp1_hit") and peak_price >= nifty_trade["tp1"]:
+                            nifty_trade["tp1_hit"] = True
+                            state_changed = True
+                            send_telegram(
+                                f"{HEADER}Trade : {nifty_trade['symbol']}\n"
+                                f"TP-1 hit : {nifty_trade['tp1']:.2f}"
+                            )
+
+                        if not nifty_trade.get("tp2_hit") and peak_price >= nifty_trade["tp2"]:
+                            nifty_trade["tp2_hit"] = True
+                            state_changed = True
+                            send_telegram(
+                                f"{HEADER}Trade : {nifty_trade['symbol']}\n"
+                                f"TP-2 hit : {nifty_trade['tp2']:.2f}"
+                            )
+
+                        if peak_price >= nifty_trade["tp3"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"TP-3 hit : {nifty_trade['tp3']:.2f}\n"
@@ -214,7 +232,7 @@ def run_bot():
                             nifty_trade = None
                             nifty_cooldown_until = now_ts + 600
                             state_changed = True
-                        elif opt_low <= (nifty_trade["sl"] + 0.75) or ltp <= (nifty_trade["sl"] + 0.75):
+                        elif trough_price <= nifty_trade["sl"]:
                             send_telegram(
                                 f"{HEADER}Trade : {nifty_trade['symbol']}\n"
                                 f"SL hit : {nifty_trade['sl']:.2f}\n"
@@ -259,6 +277,8 @@ def run_bot():
                                                 "tp1": tp1_val,
                                                 "tp2": tp2_val,
                                                 "tp3": tp3_val,
+                                                "tp1_hit": False,
+                                                "tp2_hit": False,
                                                 "sim_meta": feed._active_sim.get(strike_info["security_id"])
                                             }
                                             state_changed = True
@@ -273,7 +293,7 @@ def run_bot():
                                             )
 
             # ==========================================
-            # 2. BTC-USD ENGINE (6:30 PM - 6:00 AM IST | 1:2 Target)
+            # 2. BTC-USD ENGINE (Instant TP-1, TP-2 & SL | 1:2 Target)
             # ==========================================
             is_btc_hours = (now.hour > 18) or (now.hour == 18 and now.minute >= 30) or (now.hour < 6)
 
@@ -281,9 +301,12 @@ def run_bot():
                 btc_ltp, btc_high, btc_low = feed.get_btc_live_ticks()
                 if btc_ltp > 0:
                     is_long = btc_trade["side"] == "LONG"
-                    hit_tp1 = (btc_high >= (btc_trade["tp1"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp1"] + 10.0))
-                    hit_tp2 = (btc_high >= (btc_trade["tp2"] - 10.0)) if is_long else (btc_low <= (btc_trade["tp2"] + 10.0))
-                    hit_sl = (btc_low <= (btc_trade["sl"] + 10.0)) if is_long else (btc_high >= (btc_trade["sl"] - 10.0))
+                    peak_btc = max(btc_ltp, btc_high)
+                    trough_btc = min(btc_ltp, btc_low)
+
+                    hit_tp1 = (peak_btc >= btc_trade["tp1"]) if is_long else (trough_btc <= btc_trade["tp1"])
+                    hit_tp2 = (peak_btc >= btc_trade["tp2"]) if is_long else (trough_btc <= btc_trade["tp2"])
+                    hit_sl = (trough_btc <= btc_trade["sl"]) if is_long else (peak_btc >= btc_trade["sl"])
 
                     if not btc_trade.get("tp1_hit") and hit_tp1:
                         btc_trade["tp1_hit"] = True
@@ -358,12 +381,11 @@ def run_bot():
                     "nifty_cooldown_until": nifty_cooldown_until
                 })
 
-            time.sleep(4)
+            time.sleep(1.5)
 
         except Exception as e:
             print(f"Loop error: {e}")
-            time.sleep(6)
+            time.sleep(3)
 
 if __name__ == "__main__":
     run_bot()
-        
