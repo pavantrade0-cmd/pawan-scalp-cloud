@@ -420,4 +420,18 @@ def run_bot():
                     "current_nifty_day": current_nifty_day,
                     "current_btc_session": current_btc_session,
                     "last_boot_day": last_boot_day,
-                    "session_alerts": sessio
+                    "session_alerts": session_alerts,
+                    "btc_cooldown_until": btc_cooldown_until,
+                    "nifty_cooldown_until": nifty_cooldown_until
+                })
+
+            time.sleep(1.5)
+
+        except Exception as e:
+            print(f"Loop error: {e}", flush=True)
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    run_bot()
+# END OF FILE
