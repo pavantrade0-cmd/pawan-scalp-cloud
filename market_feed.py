@@ -1,5 +1,7 @@
 import os
+import json
 import time
+import hashlib
 import requests
 import pandas as pd
 import numpy as np
@@ -7,11 +9,14 @@ from datetime import datetime, timedelta
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
+FYERS_TOKEN_FILE = "fyers_token.json"
 
 class DhanFeed:
     def __init__(self):
-        self.dhan_client_id = os.getenv("DHAN_CLIENT_ID", "")
-        self.dhan_access_token = os.getenv("DHAN_ACCESS_TOKEN", "")
+        self.fyers_app_id = os.getenv("FYERS_APP_ID", "F2KFFQBXX0-100").strip()
+        self.fyers_secret_id = os.getenv("FYERS_SECRET_ID", "VD18YIOWBS").strip()
+        self.fyers_auth_code = os.getenv("FYERS_AUTH_CODE", "").strip()
+        self.fyers_access_token = os.getenv("FYERS_ACCESS_TOKEN", "").strip()
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -22,7 +27,44 @@ class DhanFeed:
         }
         self._session = requests.Session()
         self._active_sim = {}
-        self._cached_expiry = None
+        self._init_fyers_token()
+
+    def _init_fyers_token(self):
+        """Automatically exchanges FYERS_AUTH_CODE for an access_token and caches it."""
+        if self.fyers_access_token:
+            return
+        if os.path.exists(FYERS_TOKEN_FILE):
+            try:
+                with open(FYERS_TOKEN_FILE, "r") as f:
+                    saved = json.load(f)
+                if saved.get("auth_code") == self.fyers_auth_code and saved.get("access_token"):
+                    self.fyers_access_token = saved["access_token"]
+                    return
+            except Exception:
+                pass
+        if self.fyers_app_id and self.fyers_secret_id and self.fyers_auth_code:
+            try:
+                raw_hash = f"{self.fyers_app_id}:{self.fyers_secret_id}".encode("utf-8")
+                app_id_hash = hashlib.sha256(raw_hash).hexdigest()
+                resp = requests.post(
+                    "https://api-t1.fyers.in/api/v3/validate-authcode",
+                    json={
+                        "grant_type": "authorization_code",
+                        "appIdHash": app_id_hash,
+                        "code": self.fyers_auth_code
+                    },
+                    timeout=8
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tok = data.get("access_token", "")
+                    if tok:
+                        self.fyers_access_token = tok
+                        with open(FYERS_TOKEN_FILE, "w") as f:
+                            json.dump({"auth_code": self.fyers_auth_code, "access_token": tok}, f)
+                        print("Fyers Access Token activated successfully!")
+            except Exception as e:
+                print(f"Fyers token exchange error: {e}")
 
     def _fetch_delta_btc_candles(self, resolution="5m", days_back=4):
         """Fetch live BTCUSD Perpetual candles directly from Delta Exchange India."""
@@ -72,6 +114,22 @@ class DhanFeed:
         return df.sort_values("timestamp").reset_index(drop=True)
 
     def _get_live_nifty_spot(self):
+        if self.fyers_app_id and self.fyers_access_token:
+            try:
+                resp = requests.get(
+                    "https://api-t1.fyers.in/data/quotes?symbols=NSE:NIFTY50-INDEX",
+                    headers={"Authorization": f"{self.fyers_app_id}:{self.fyers_access_token}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    d = resp.json().get("d", [])
+                    if d and "v" in d[0]:
+                        lp = float(d[0]["v"].get("lp", 0.0))
+                        if lp > 0:
+                            return lp, lp, lp
+            except Exception:
+                pass
+
         encoded = requests.utils.quote("^NSEI")
         cb = int(time.time() * 1000)
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}?interval=1m&range=1d&_t={cb}"
@@ -93,53 +151,37 @@ class DhanFeed:
         except Exception:
             return None, None, None
 
-    def _fetch_dhan_option_chain(self):
-        """Fetch real-time NIFTY option chain from Dhan API if credentials are configured."""
-        if not self.dhan_client_id or not self.dhan_access_token:
+    def _fetch_fyers_option_chain(self):
+        """Fetch real-time NIFTY 50 option chain directly from Fyers API v3."""
+        if not self.fyers_app_id or not self.fyers_access_token:
             return []
-        dhan_headers = {
-            "access-token": self.dhan_access_token,
-            "client-id": self.dhan_client_id,
-            "Content-Type": "application/json"
-        }
         try:
-            if not self._cached_expiry:
-                exp_resp = requests.post(
-                    "https://api.dhan.co/v2/optionchain/expirylist",
-                    headers=dhan_headers,
-                    json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
-                    timeout=5
-                )
-                if exp_resp.status_code == 200:
-                    exp_list = exp_resp.json().get("data", [])
-                    if exp_list:
-                        self._cached_expiry = exp_list[0]
-            if self._cached_expiry:
-                oc_resp = requests.post(
-                    "https://api.dhan.co/v2/optionchain",
-                    headers=dhan_headers,
-                    json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": self._cached_expiry},
-                    timeout=6
-                )
-                if oc_resp.status_code == 200:
-                    oc_map = oc_resp.json().get("data", {}).get("oc", {})
-                    rows = []
-                    for strike_key, sides in oc_map.items():
-                        row = {"strikePrice": float(strike_key)}
-                        if "ce" in sides and sides["ce"].get("last_price"):
-                            row["CE"] = {"lastPrice": float(sides["ce"]["last_price"])}
-                        if "pe" in sides and sides["pe"].get("last_price"):
-                            row["PE"] = {"lastPrice": float(sides["pe"]["last_price"])}
-                        rows.append(row)
-                    return rows
+            resp = requests.get(
+                "https://api-t1.fyers.in/data/options-chain-v3?symbol=NSE:NIFTY50-INDEX&strikecount=12&timestamp=",
+                headers={"Authorization": f"{self.fyers_app_id}:{self.fyers_access_token}"},
+                timeout=6
+            )
+            if resp.status_code == 200:
+                options_list = resp.json().get("data", {}).get("optionsChain", [])
+                strike_map = {}
+                for item in options_list:
+                    sp = float(item.get("strike_price", 0))
+                    otype = item.get("option_type", "")
+                    ltp = float(item.get("ltp", 0))
+                    if sp > 0 and otype in ("CE", "PE") and ltp > 0:
+                        strike_map.setdefault(sp, {"strikePrice": sp})[otype] = {
+                            "lastPrice": ltp,
+                            "fyers_symbol": item.get("symbol", "")
+                        }
+                return list(strike_map.values())
         except Exception:
             pass
         return []
 
     def _fetch_nse_option_chain(self):
-        dhan_rows = self._fetch_dhan_option_chain()
-        if dhan_rows:
-            return dhan_rows
+        fyers_rows = self._fetch_fyers_option_chain()
+        if fyers_rows:
+            return fyers_rows
         try:
             self._session.get("https://www.nseindia.com", headers=self.headers, timeout=4)
             resp = self._session.get(
@@ -154,13 +196,10 @@ class DhanFeed:
         return []
 
     def _estimate_option_premium(self, spot_val, strike, option_type):
-        """Exact Sahi Option Chain calibration (Spot 25512: 25400 CE = 177.25, 25550 PE = 170.00)."""
         if option_type == "CE":
-            # Spot 25512 -> 25500 CE: 122.90, 25450 CE: 148.25, 25400 CE: 177.25, 25350 CE: 209.25
             intrinsic = max(0.0, spot_val - strike)
             return round(115.5 + 0.56 * intrinsic, 2)
         else:
-            # Spot 25512 -> 25500 PE: 141.55, 25550 PE: 170.00, 25600 PE: 200.70, 25650 PE: 235.00
             intrinsic = max(0.0, strike - spot_val)
             return round(148.0 + 0.58 * intrinsic, 2)
 
@@ -268,6 +307,24 @@ class DhanFeed:
         strike_str, opt_type = sid_str.split("_")
         strike_val = float(strike_str)
 
+        if sid_str in self._active_sim and self._active_sim[sid_str].get("fyers_symbol") and self.fyers_access_token:
+            fsym = self._active_sim[sid_str]["fyers_symbol"]
+            try:
+                resp = requests.get(
+                    f"https://api-t1.fyers.in/data/quotes?symbols={fsym}",
+                    headers={"Authorization": f"{self.fyers_app_id}:{self.fyers_access_token}"},
+                    timeout=5
+                )
+                if resp.status_code == 200:
+                    d = resp.json().get("d", [])
+                    if d and "v" in d[0]:
+                        lp = float(d[0]["v"].get("lp", 0.0))
+                        if lp > 0:
+                            val = round(lp, 2)
+                            return val, val, val
+            except Exception:
+                pass
+
         oc_data = self._fetch_nse_option_chain()
         for row in oc_data:
             if float(row.get("strikePrice", 0)) == strike_val and opt_type in row:
@@ -298,18 +355,19 @@ class DhanFeed:
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
-        # 1. Live Dhan / NSE Option Chain: separate lookup for CE vs PE strike > ₹150
+        # 1. Live Fyers / NSE Option Chain: separate lookup for CE vs PE strike > ₹150
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
             if opt_type in row:
                 ltp = float(row[opt_type].get("lastPrice", 0))
+                fsym = row[opt_type].get("fyers_symbol", "")
                 if 152.0 <= ltp <= 230.0:
-                    candidates.append((ltp, sp))
+                    candidates.append((ltp, sp, fsym))
 
         if candidates:
             candidates.sort(key=lambda x: x[0])
-            real_ltp, sp = candidates[0]
+            real_ltp, sp, fsym = candidates[0]
             strike = int(sp)
             sec_id = f"{strike}_{option_type}"
             self._active_sim[sec_id] = {
@@ -317,6 +375,7 @@ class DhanFeed:
                 "ref_spot": ref_spot,
                 "ref_ltp": round(real_ltp, 2),
                 "option_type": option_type,
+                "fyers_symbol": fsym,
                 "entry_ts": time.time()
             }
             return {
@@ -327,7 +386,7 @@ class DhanFeed:
                 "ltp": round(real_ltp, 2)
             }
 
-        # 2. Fallback: scan CE side (ITM downwards) or PE side (ITM upwards) for first strike > ₹150
+        # 2. Fallback: scan CE side or PE side for first strike > ₹150
         for offset in (0, 50, 100, 150, 200, 250):
             strike = int(atm - offset) if option_type == "CE" else int(atm + offset)
             est_ltp = self._estimate_option_premium(ref_spot, strike, option_type)
@@ -348,4 +407,4 @@ class DhanFeed:
                     "ltp": est_ltp
                 }
         return None
-        
+                            
