@@ -12,7 +12,7 @@ IST = pytz.timezone("Asia/Kolkata")
 FYERS_TOKEN_FILE = "fyers_token.json"
 
 class DhanFeed:
-    def __init__(self):
+    def __init__(self, skip_init=False):
         self.fyers_app_id = os.getenv("FYERS_APP_ID", "F2KFFQBXX0-100").strip()
         self.fyers_secret_id = os.getenv("FYERS_SECRET_ID", "VD18YIOWBS").strip()
         self.fyers_auth_code = os.getenv("FYERS_AUTH_CODE", "").strip()
@@ -27,23 +27,42 @@ class DhanFeed:
         }
         self._session = requests.Session()
         self._active_sim = {}
-        self._init_fyers_token()
+        self._last_token_mtime = 0
+        if not skip_init:
+            self._init_fyers_token()
 
-    def _init_fyers_token(self):
-        """Automatically exchanges FYERS_AUTH_CODE for an access_token and caches it."""
-        if self.fyers_access_token:
-            print("Fyers Access Token loaded from ENV!", flush=True)
-            return
+    def reload_token_if_updated(self):
+        """Hot-reloads newly activated Fyers token from disk without restarting the worker."""
         if os.path.exists(FYERS_TOKEN_FILE):
             try:
-                with open(FYERS_TOKEN_FILE, "r") as f:
-                    saved = json.load(f)
-                if saved.get("auth_code") == self.fyers_auth_code and saved.get("access_token"):
-                    self.fyers_access_token = saved["access_token"]
-                    print("Fyers Access Token loaded from cache!", flush=True)
-                    return
+                mtime = os.path.getmtime(FYERS_TOKEN_FILE)
+                if mtime > self._last_token_mtime:
+                    with open(FYERS_TOKEN_FILE, "r") as f:
+                        saved = json.load(f)
+                    if saved.get("access_token"):
+                        self.fyers_access_token = saved["access_token"]
+                        self._last_token_mtime = mtime
             except Exception:
                 pass
+
+    def _init_fyers_token(self, force_exchange=False):
+        """Automatically exchanges auth_code for an access_token and caches it."""
+        if not force_exchange:
+            if self.fyers_access_token:
+                print("Fyers Access Token loaded from ENV!", flush=True)
+                return
+            if os.path.exists(FYERS_TOKEN_FILE):
+                try:
+                    with open(FYERS_TOKEN_FILE, "r") as f:
+                        saved = json.load(f)
+                    if saved.get("access_token"):
+                        self.fyers_access_token = saved["access_token"]
+                        self._last_token_mtime = os.path.getmtime(FYERS_TOKEN_FILE)
+                        print("Fyers Access Token loaded from cache!", flush=True)
+                        return
+                except Exception:
+                    pass
+
         if self.fyers_app_id and self.fyers_secret_id and self.fyers_auth_code:
             try:
                 raw_hash = f"{self.fyers_app_id}:{self.fyers_secret_id}".encode("utf-8")
@@ -63,6 +82,7 @@ class DhanFeed:
                     self.fyers_access_token = tok
                     with open(FYERS_TOKEN_FILE, "w") as f:
                         json.dump({"auth_code": self.fyers_auth_code, "access_token": tok}, f)
+                    self._last_token_mtime = os.path.getmtime(FYERS_TOKEN_FILE)
                     print("Fyers Access Token activated successfully!", flush=True)
                 else:
                     print(f"Fyers token failed: {data}", flush=True)
@@ -362,9 +382,9 @@ class DhanFeed:
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
-            if opt_type in row:
-                ltp = float(row[opt_type].get("lastPrice", 0))
-                fsym = row[opt_type].get("fyers_symbol", "")
+            if option_type in row:
+                ltp = float(row[option_type].get("lastPrice", 0))
+                fsym = row[option_type].get("fyers_symbol", "")
                 if 152.0 <= ltp <= 230.0:
                     candidates.append((ltp, sp, fsym))
 
@@ -405,9 +425,4 @@ class DhanFeed:
                 return {
                     "security_id": sec_id,
                     "symbol": f"NIFTY {strike} {option_type}",
-                    "strike": float(strike),
-                    "option_type": option_type,
-                    "ltp": est_ltp
-                }
-        return None
-                    
+                    "strike": f
