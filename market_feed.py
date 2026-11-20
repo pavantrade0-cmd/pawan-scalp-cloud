@@ -1,3 +1,4 @@
+import os
 import time
 import requests
 import pandas as pd
@@ -9,6 +10,8 @@ IST = pytz.timezone("Asia/Kolkata")
 
 class DhanFeed:
     def __init__(self):
+        self.dhan_client_id = os.getenv("DHAN_CLIENT_ID", "")
+        self.dhan_access_token = os.getenv("DHAN_ACCESS_TOKEN", "")
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -19,6 +22,7 @@ class DhanFeed:
         }
         self._session = requests.Session()
         self._active_sim = {}
+        self._cached_expiry = None
 
     def _fetch_delta_btc_candles(self, resolution="5m", days_back=4):
         """Fetch live BTCUSD Perpetual candles directly from Delta Exchange India."""
@@ -89,16 +93,76 @@ class DhanFeed:
         except Exception:
             return None, None, None
 
+    def _fetch_dhan_option_chain(self):
+        """Fetch real-time NIFTY option chain from Dhan API if credentials are configured."""
+        if not self.dhan_client_id or not self.dhan_access_token:
+            return []
+        dhan_headers = {
+            "access-token": self.dhan_access_token,
+            "client-id": self.dhan_client_id,
+            "Content-Type": "application/json"
+        }
+        try:
+            if not self._cached_expiry:
+                exp_resp = requests.post(
+                    "https://api.dhan.co/v2/optionchain/expirylist",
+                    headers=dhan_headers,
+                    json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I"},
+                    timeout=5
+                )
+                if exp_resp.status_code == 200:
+                    exp_list = exp_resp.json().get("data", [])
+                    if exp_list:
+                        self._cached_expiry = exp_list[0]
+            if self._cached_expiry:
+                oc_resp = requests.post(
+                    "https://api.dhan.co/v2/optionchain",
+                    headers=dhan_headers,
+                    json={"UnderlyingScrip": 13, "UnderlyingSeg": "IDX_I", "Expiry": self._cached_expiry},
+                    timeout=6
+                )
+                if oc_resp.status_code == 200:
+                    oc_map = oc_resp.json().get("data", {}).get("oc", {})
+                    rows = []
+                    for strike_key, sides in oc_map.items():
+                        row = {"strikePrice": float(strike_key)}
+                        if "ce" in sides and sides["ce"].get("last_price"):
+                            row["CE"] = {"lastPrice": float(sides["ce"]["last_price"])}
+                        if "pe" in sides and sides["pe"].get("last_price"):
+                            row["PE"] = {"lastPrice": float(sides["pe"]["last_price"])}
+                        rows.append(row)
+                    return rows
+        except Exception:
+            pass
+        return []
+
+    def _fetch_nse_option_chain(self):
+        dhan_rows = self._fetch_dhan_option_chain()
+        if dhan_rows:
+            return dhan_rows
+        try:
+            self._session.get("https://www.nseindia.com", headers=self.headers, timeout=4)
+            resp = self._session.get(
+                "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",
+                headers=self.headers,
+                timeout=6
+            )
+            if resp.status_code == 200:
+                return resp.json().get("records", {}).get("data", [])
+        except Exception:
+            pass
+        return []
+
     def _estimate_option_premium(self, spot_val, strike, option_type):
-        """Separate Sahi Option Chain curve for CE side and PE side."""
+        """Exact Sahi Option Chain calibration (Spot 25512: 25400 CE = 177.25, 25550 PE = 170.00)."""
         if option_type == "CE":
-            # CE side: e.g. at Spot 25375 -> 25350 CE = 162.65 (>150), 25300 CE = 192.90
+            # Spot 25512 -> 25500 CE: 122.90, 25450 CE: 148.25, 25400 CE: 177.25, 25350 CE: 209.25
             intrinsic = max(0.0, spot_val - strike)
-            return round(147.0 + 0.61 * intrinsic, 2)
+            return round(115.5 + 0.56 * intrinsic, 2)
         else:
-            # PE side: e.g. at Spot 25375 -> 25450 PE = 162.40 (>150), 25500 PE = 192.00
+            # Spot 25512 -> 25500 PE: 141.55, 25550 PE: 170.00, 25600 PE: 200.70, 25650 PE: 235.00
             intrinsic = max(0.0, strike - spot_val)
-            return round(117.0 + 0.60 * intrinsic, 2)
+            return round(148.0 + 0.58 * intrinsic, 2)
 
     def _calc_dynamic_option_price(self, meta, spot_val):
         entry_ts = meta.get("entry_ts", time.time())
@@ -114,20 +178,6 @@ class DhanFeed:
         eff_delta = 0.78 if move > 35.0 else (0.66 if move > 15.0 else 0.60)
         return max(1.0, round(meta["ref_ltp"] + move * eff_delta - theta_decay, 2))
 
-    def _fetch_nse_option_chain(self):
-        try:
-            self._session.get("https://www.nseindia.com", headers=self.headers, timeout=4)
-            resp = self._session.get(
-                "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY",
-                headers=self.headers,
-                timeout=6
-            )
-            if resp.status_code == 200:
-                return resp.json().get("records", {}).get("data", [])
-        except Exception:
-            pass
-        return []
-
     def get_intraday_candles(self, security_id="13", exchange_segment="IDX_I", instrument="INDEX", interval="5", days_back=5):
         sid = str(security_id)
         if sid == "13":
@@ -140,7 +190,7 @@ class DhanFeed:
             return pd.DataFrame()
 
         meta = self._active_sim[sid]
-        delta = 0.60 if meta["option_type"] == "CE" else -0.60
+        delta = 0.58 if meta["option_type"] == "CE" else -0.58
         ref_spot = meta["ref_spot"]
         ref_ltp = meta["ref_ltp"]
 
@@ -248,7 +298,7 @@ class DhanFeed:
         atm = round(ref_spot / 50.0) * 50
         oc_data = self._fetch_nse_option_chain()
 
-        # 1. Live NSE Option Chain: separate lookup for CE vs PE strike > ₹150
+        # 1. Live Dhan / NSE Option Chain: separate lookup for CE vs PE strike > ₹150
         candidates = []
         for row in oc_data:
             sp = float(row.get("strikePrice", 0))
