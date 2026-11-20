@@ -192,7 +192,7 @@ def run_bot():
 
             # ==========================================
             # 1. NIFTY 50 ENGINE (Mon-Fri 9:25 - 15:15 IST)
-            #    Trade label: CE / PE only
+            #    Separate CE / PE > ₹150 strike selection + Strike & CE/PE label
             # ==========================================
             is_nifty_hours = (now.weekday() < 5) and (
                 (now.hour == 9 and now.minute >= 25)
@@ -236,8 +236,8 @@ def run_bot():
                             signal = nifty_engine.evaluate_spot_signal(closed_df, pdh, pdl)
                             if signal:
                                 spot_close = float(closed_df.iloc[-1]["close"])
-                                strike_info = feed.select_strike_above_180(spot_close, option_type=signal["direction"])
-                                if strike_info and strike_info["ltp"] > 180.0:
+                                strike_info = feed.select_strike_above_150(spot_close, option_type=signal["direction"])
+                                if strike_info and strike_info["ltp"] > 150.0:
                                     opt_df = feed.get_intraday_candles(security_id=strike_info["security_id"], interval="5", days_back=2)
                                     if len(opt_df) >= 12:
                                         risk = nifty_engine.validate_option_entry(opt_df.iloc[:-1], strike_info["ltp"])
@@ -250,7 +250,7 @@ def run_bot():
                                             tp1_val = round(entry_val + sl_pts, 2)
                                             tp2_val = round(entry_val + sl_pts * 2, 2)
                                             tp3_val = round(entry_val + sl_pts * 3, 2)
-                                            trade_label = f"{strike_info['option_type']}"
+                                            trade_label = f"{int(strike_info['strike'])} {strike_info['option_type']}"
                                             nifty_trade = {
                                                 "security_id": strike_info["security_id"],
                                                 "symbol": trade_label,
@@ -366,4 +366,4 @@ def run_bot():
 
 if __name__ == "__main__":
     run_bot()
-    
+        
